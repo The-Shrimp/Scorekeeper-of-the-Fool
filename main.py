@@ -148,9 +148,9 @@ async def display_scoreboard(interaction: discord.Interaction, year: int, split:
             score_summary_sorted = score_summary.sort_values(by='PlayerID')
 
             # Building the response string
-            response = f"## {year} Split {split} ##\n\n"
-            response += "\n".join([f"**{row['PlayerID']} - {row['Score']} points**" for index, row in score_summary_sorted.iterrows()])
-            response += "\n---------------------------"
+            response = f"## {year} Split - {split} ##\n\n"
+            response += "Our Contestants Are: \n"
+            response += "\n\n".join([f"**{row['PlayerID']} - {row['Score']} points**" for index, row in score_summary_sorted.iterrows()])
 
             await interaction.response.send_message(response)
         else:
