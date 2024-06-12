@@ -149,7 +149,7 @@ async def display_scoreboard(interaction: discord.Interaction, year: int, split:
 
             # Building the response string
             response = f"## {year} Split - {split} ##\n\n"
-            response += "Our Contestants Are: \n"
+            response += "**The Contestants Are:** \n\n"
             response += "\n\n".join([f"**{row['PlayerID']} - {row['Score']} points**" for index, row in score_summary_sorted.iterrows()])
 
             await interaction.response.send_message(response)

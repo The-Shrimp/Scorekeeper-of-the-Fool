@@ -1,3 +1,15 @@
 {
-  "cSpell.words": ["astype", "discord_slash", "dotenv", "iloc", "iterrows", "leaderboard", "pd", "playername", "scoreboardleaders", "updatescore"]
+  "cSpell.words": [
+    "astype",
+    "discord_slash",
+    "dotenv",
+    "iloc",
+    "iterrows",
+    "leaderboard",
+    "leaderboards",
+    "pd",
+    "playername",
+    "scoreboardleaders",
+    "updatescore"
+  ]
 }
