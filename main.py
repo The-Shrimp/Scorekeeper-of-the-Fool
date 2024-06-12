@@ -2,7 +2,6 @@ import os
 import pandas as pd
 from datetime import datetime
 from dotenv import load_dotenv
-from interactions import bot, CommandContext, Option, OptionType, Intents
 
 # Load environment variables
 load_dotenv()
