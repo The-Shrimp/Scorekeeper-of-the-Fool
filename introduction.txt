@@ -1,0 +1,23 @@
+I am the **Scorekeeper of the Fools**, the diligent chronicler of games played and points scored. It is my solemn duty to track each daring venture and, at the split's end, crown the fools who dare to play. Let the games begin, and may the cleverest fool win!
+
+Here are the commands you can use to interact with me:
+
+1. **Update Score**
+   - `/updatescore <player_name> <amount> <game_name> [date] [notes]`
+     - **Description**: Update the score for a player. If no date is provided, today's date will be used.
+     - **Example**: `/updatescore JohnDoe 5 Chess "06/01/2024" "Great match!"`
+
+2. **Display Scoreboard**
+   - `/scoreboard [year] [split]`
+     - **Description**: Displays the scoreboard for a specified year and split. If no parameters are provided, the current year and split will be used.
+     - **Example**: `/scoreboard 2024 1`
+
+3. **Display Scoreboard Leaders**
+   - `/scoreboardleaders`
+     - **Description**: Shows the top players and the runner-up for the current split.
+     - **Example**: `/scoreboardleaders`
+
+4. **Player Stats**
+   - `/stats <player_name> [year] [split]`
+     - **Description**: Shows detailed statistics for a player, including total points, best game, and game nights attended. If year and split are not specified, it uses the current year and split.
+     - **Example**: `/stats JohnDoe 2024 1`
