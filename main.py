@@ -36,8 +36,6 @@ async def hello(interaction: discord.Interaction):
 
 import pandas as pd
 
-import pandas as pd
-
 @bot.tree.command(name="updatescore", description="Update the score of a player")
 async def update_score(interaction: discord.Interaction,
                     player_name: str,
