@@ -5,6 +5,9 @@ import pandas as pd
 from datetime import datetime
 from dotenv import load_dotenv
 
+#import bot instance
+from bot_instance import bot
+
 # Import commands from command families
 from score_updates import update_score, display_scoreboard_leaders, display_scoreboard
 from player_stats import display_player_stats

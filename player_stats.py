@@ -1,8 +1,9 @@
 import discord
 from discord.ext import commands
 import os
+import pandas as pd
 from datetime import datetime
-from dotenv import load_dotenv
+from bot_instance import bot
 
 # Display statistics for a specified player, year, and split
 @bot.tree.command(name="stats", description="Display statistics for a specified player, year, and split")
