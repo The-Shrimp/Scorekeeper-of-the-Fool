@@ -1,8 +1,9 @@
 import discord
 from discord.ext import commands
 import os
+import pandas as pd
 from datetime import datetime
-from dotenv import load_dotenv
+from bot_instance import bot
 
 @bot.tree.command(name="updatescore", description="Update the score of a player")
 async def update_score(interaction: discord.Interaction,
