@@ -4,6 +4,7 @@ import os
 import pandas as pd
 from datetime import datetime
 from bot_instance import bot
+from determine_splits import determine_split
 
 @bot.tree.command(name="updatescore", description="Update the score of a player")
 async def update_score(interaction: discord.Interaction,
