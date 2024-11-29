@@ -4,6 +4,7 @@ import os
 import pandas as pd
 from datetime import datetime
 from dotenv import load_dotenv
+from determine_splits import determine_split
 
 #import bot instance
 from bot_instance import bot
@@ -34,11 +35,6 @@ async def on_ready():
         print(f'Synced {len(synced)} command(s)')
     except Exception as e:
         print(f'Error in syncing commands: {e}')
-
-# Helper function to determine the split based on the date
-def determine_split(date):
-    month, day, year = map(int, date.split('/'))
-    return "Split1" if 1 <= month <= 6 else "Split2"
 
 # Command to schedule a new game night
 @bot.tree.command(name="schedulenew", description="Schedule a new game night")
