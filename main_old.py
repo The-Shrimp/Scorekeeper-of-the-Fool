@@ -1,3 +1,65 @@
+"""
+Scorekeeper of the Fool — Discord Bot
+=====================================
+
+PURPOSE
+- Records game night results into split-based CSVs.
+- Manages player aliases (DiscordID -> Alias).
+- Schedules game night announcements and tracks RSVP reactions.
+
+HOW TO RUN (dev)
+- Activate venv (or use VS Code interpreter)
+- python main.py
+
+DATA FILES
+- aliases.csv
+  Columns: DiscordID, Alias
+
+- {YEAR}_Split{1|2}.csv
+  Columns (preferred): DiscordID, PlayerID, Score, GameName, Date, Notes
+
+- {YEAR}_Split{1|2}_gamenights.csv
+  Columns: Date, Status, Time, Location, Notes, Attendees, Possible Attendees, Afterwards Comments
+
+----------------------------------------------------------------------
+INDEX
+1) Imports & Configuration
+   - constants (role names, channel names, emojis)
+   - bot intents / bot initialization
+
+2) Utility Helpers
+   2.1 Date/Split helpers (determine_split, upcoming Saturday utilities)
+   2.2 Parsing helpers (time parsing, mention/alias parsing)
+   2.3 CSV helpers (safe read/merge/write patterns)
+   2.4 Logging helpers (optional)
+
+3) Alias System
+   - load_aliases()
+   - save_alias()
+   - get_alias_for_member()
+   - /setalias
+   - /applyalias
+
+4) Score Recording
+   - /updatescore (legacy / optional)
+   - /gamescore (current)
+   - scoreboard/stat commands (scoreboard, leaders, stats)
+
+5) Scheduling & RSVP
+   - schedule CSV helpers (ensure_schedule_file_for_date, update_schedule_entry)
+   - /schedulegamenight
+   - reaction handlers (on_raw_reaction_add/remove)
+   - startup reconcile (reconcile_active_invitation)
+
+6) Bot Lifecycle
+   - on_ready()
+   - bot.run()
+
+NOTES / TODO
+- TODO: /aftergamenight (writes Afterwards Comments)
+- TODO: /cancelgamenight (mark cancelled + post notice)
+"""
+
 import discord
 from discord.ext import commands
 import os
@@ -99,7 +161,10 @@ def ensure_schedule_file_for_date(target_date: date) -> str:
     # Ensure Date is unique and sorted
     if not df.empty:
         df = df.drop_duplicates(subset=["Date"])
-        df = df.sort_values(by="Date")
+        # Sort chronologically by parsing MM/DD/YYYY
+        df["_sort_date"] = df["Date"].apply(lambda s: datetime.strptime(s, "%m/%d/%Y"))
+        df = df.sort_values(by="_sort_date").drop(columns=["_sort_date"])
+
 
     df.to_csv(file_name, index=False)
     return file_name
@@ -463,14 +528,90 @@ async def apply_alias_command(interaction: discord.Interaction):
 with open('introduction.txt', 'r', encoding='utf-8') as file:
     introduction = file.read()
 
+async def reconcile_active_invitation(guild: discord.Guild):
+    """
+    On startup, scan the announcement channel for the most recent invite message,
+    then sync its current ✅ / ❔ reactions into the schedule CSV.
+    """
+
+    channel = discord.utils.get(guild.text_channels, name=ANNOUNCEMENT_CHANNEL_NAME)
+    if channel is None:
+        print(f"[startup] Channel #{ANNOUNCEMENT_CHANNEL_NAME} not found; skipping reconcile.")
+        return
+
+    # Find the most recent message with a date pattern
+    active_message = None
+    active_date = None
+
+    async for msg in channel.history(limit=50):
+        d = await _extract_date_from_message(msg)
+        if d is not None:
+            active_message = msg
+            active_date = d
+            break
+
+    if active_message is None or active_date is None:
+        print("[startup] No recent invite message found; skipping reconcile.")
+        return
+
+    # Collect current reaction states
+    yes_members = []
+    maybe_members = []
+
+    for reaction in active_message.reactions:
+        if str(reaction.emoji) == YES_EMOJI:
+            async for user in reaction.users():
+                if user.bot:
+                    continue
+                member = await _get_member(guild, user.id)
+                if member is not None and not member.bot:
+                    yes_members.append(member)
+
+        if str(reaction.emoji) == MAYBE_EMOJI:
+            async for user in reaction.users():
+                if user.bot:
+                    continue
+                member = await _get_member(guild, user.id)
+                if member is not None and not member.bot:
+                    maybe_members.append(member)
+
+    # Enforce exclusivity at the data level (YES wins if both somehow exist)
+    yes_ids = {m.id for m in yes_members}
+    maybe_members = [m for m in maybe_members if m.id not in yes_ids]
+
+    attendees = ", ".join(get_alias_for_member(m) for m in yes_members)
+    possible = ", ".join(get_alias_for_member(m) for m in maybe_members)
+
+    # Update the schedule row for this date
+    update_schedule_entry(
+        target_date=active_date,
+        status="Scheduled",
+        attendees=attendees,
+        possible_attendees=possible,
+    )
+
+    print(f"[startup] Reconciled invite {active_date.strftime('%m/%d/%Y')} "
+          f"(yes={len(yes_members)}, maybe={len(maybe_members)}).")
+
+
 @bot.event
 async def on_ready():
     print("Bot is ready")
     try:
         synced = await bot.tree.sync()
-        print(f'Synced {len(synced)} command(s)')
+        print(f"Synced {len(synced)} command(s)")
     except Exception as e:
-        print(f'Error in syncing commands: {e}')
+        print(f"Error in syncing commands: {e}")
+
+    # NEW: Startup reconciliation for reactions/status on the active invitation
+    try:
+        # If your bot is only in one server, this is enough.
+        # If it's in multiple servers, this will reconcile each.
+        for g in bot.guilds:
+            await reconcile_active_invitation(g)
+    except Exception as e:
+        print(f"[startup] Error while reconciling active invitation: {e}")
+
 
 # Helper function to determine the split based on the date
 def determine_split(date):
@@ -479,8 +620,7 @@ def determine_split(date):
 
 @bot.tree.command(name='introductions')
 async def hello(interaction: discord.Interaction):
-    await interaction.response.send_message(f'Hello, {interaction.user.mention}! \n {introduction}')
-    ephemeral=True
+    await interaction.response.send_message(f'Hello, {interaction.user.mention}! \n {introduction}', ephemeral=True)
 
 @bot.tree.command(name="updatescore", description="Update the score of a player")
 async def update_score(interaction: discord.Interaction,
@@ -813,6 +953,7 @@ async def gamescore(
         player_label = get_alias_for_member(winner)  # alias or display_name
         rows.append(
             {
+                "DiscordID": str(winner.id),
                 "PlayerID": player_label,
                 "Score": float(points),
                 "GameName": game_name,
@@ -821,11 +962,13 @@ async def gamescore(
             }
         )
 
+
     # Other Players: 0 points
     for other in other_members:
         player_label = get_alias_for_member(other)
         rows.append(
             {
+                "DiscordID": str(other.id),
                 "PlayerID": player_label,
                 "Score": 0.0,
                 "GameName": game_name,
@@ -834,14 +977,35 @@ async def gamescore(
             }
         )
 
+
     # Append to CSV (keeping columns consistent)
+    # Build a dataframe for the new rows
     new_df = pd.DataFrame(rows)
+
     if os.path.exists(file_name):
         existing_df = pd.read_csv(file_name)
+
+        # 1) If the old file doesn't have DiscordID, add it (blank)
+        if "DiscordID" not in existing_df.columns:
+            existing_df["DiscordID"] = ""
+
+        # 2) Ensure new_df has all columns that existing_df has
+        for col in existing_df.columns:
+            if col not in new_df.columns:
+                new_df[col] = ""
+
+        # 3) Ensure existing_df has all columns that new_df has (future-proofing)
+        for col in new_df.columns:
+            if col not in existing_df.columns:
+                existing_df[col] = ""
+
+        # 4) Combine and save
         combined_df = pd.concat([existing_df, new_df], ignore_index=True)
         combined_df.to_csv(file_name, index=False)
     else:
+        # First time creating the file, just write new_df
         new_df.to_csv(file_name, index=False)
+
 
     # Build a clean, public summary message (no pings)
     winners_list = ", ".join(get_alias_for_member(w) for w in winner_members)
@@ -1003,6 +1167,120 @@ async def schedule_gamenight(
         f"and announcement posted in {target_channel.mention}.",
         ephemeral=True,
     )
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.user_id == bot.user.id:
+        return
+
+    emoji_str = str(payload.emoji)
+    if emoji_str not in {YES_EMOJI, MAYBE_EMOJI}:
+        return
+
+    guild = bot.get_guild(payload.guild_id)
+    if guild is None:
+        return
+
+    channel = guild.get_channel(payload.channel_id)
+    if not isinstance(channel, discord.TextChannel):
+        return
+
+    if channel.name != ANNOUNCEMENT_CHANNEL_NAME:
+        return
+
+    message = await channel.fetch_message(payload.message_id)
+    target_date = await _extract_date_from_message(message)
+    if target_date is None:
+        return
+
+    member = payload.member or await _get_member(guild, payload.user_id)
+    if member is None or member.bot:
+        return
+
+    status = "yes" if emoji_str == YES_EMOJI else "maybe"
+    update_schedule_attendance_for_member(target_date, member, status)
+
+    # Enforce one reaction at a time: remove the other if present
+    other_emoji = MAYBE_EMOJI if emoji_str == YES_EMOJI else YES_EMOJI
+    for reaction in message.reactions:
+        if str(reaction.emoji) == other_emoji:
+            async for user in reaction.users():
+                if user.id == member.id:
+                    await message.remove_reaction(reaction.emoji, user)
+                    break
+
+
+@bot.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    if payload.user_id == bot.user.id:
+        return
+
+    emoji_str = str(payload.emoji)
+    if emoji_str not in {YES_EMOJI, MAYBE_EMOJI}:
+        return
+
+    guild = bot.get_guild(payload.guild_id)
+    if guild is None:
+        return
+
+    channel = guild.get_channel(payload.channel_id)
+    if not isinstance(channel, discord.TextChannel):
+        return
+
+    if channel.name != ANNOUNCEMENT_CHANNEL_NAME:
+        return
+
+    message = await channel.fetch_message(payload.message_id)
+    target_date = await _extract_date_from_message(message)
+    if target_date is None:
+        return
+
+    member = await _get_member(guild, payload.user_id)
+    if member is None or member.bot:
+        return
+
+    # Determine what the member still has on the message
+    has_yes = False
+    has_maybe = False
+
+    for reaction in message.reactions:
+        if str(reaction.emoji) in {YES_EMOJI, MAYBE_EMOJI}:
+            async for user in reaction.users():
+                if user.id == member.id:
+                    if str(reaction.emoji) == YES_EMOJI:
+                        has_yes = True
+                    else:
+                        has_maybe = True
+
+    if has_yes:
+        update_schedule_attendance_for_member(target_date, member, "yes")
+    elif has_maybe:
+        update_schedule_attendance_for_member(target_date, member, "maybe")
+    else:
+        update_schedule_attendance_for_member(target_date, member, "none")
+
+
+async def _extract_date_from_message(message: discord.Message) -> Optional[date]:
+    """Find the first MM/DD/YYYY date in the message content."""
+    match = re.search(r"\b(\d{2}/\d{2}/\d{4})\b", message.content)
+    if not match:
+        return None
+    try:
+        dt = datetime.strptime(match.group(1), "%m/%d/%Y")
+        return dt.date()
+    except ValueError:
+        return None
+
+async def _get_member(guild: discord.Guild, user_id: int) -> Optional[discord.Member]:
+    """Get member from cache or fetch from API."""
+    member = guild.get_member(user_id)
+    if member is not None:
+        return member
+    try:
+        return await guild.fetch_member(user_id)
+    except Exception:
+        return None
+
 
 bot_token = os.getenv('DISCORD_BOT_TOKEN')
 bot.run(bot_token)
