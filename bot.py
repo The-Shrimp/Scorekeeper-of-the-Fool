@@ -21,6 +21,8 @@ import aliases
 import scoring
 import schedule
 import rsvp
+import competitive_scoring
+
 
 def create_bot() -> commands.Bot:
     intents = discord.Intents.all()
@@ -30,6 +32,8 @@ def create_bot() -> commands.Bot:
     aliases.register(bot)
     scoring.register(bot)
     schedule.register(bot)
+    competitive_scoring.register(bot)
+
 
     # Register event listeners
     rsvp.register(bot)
