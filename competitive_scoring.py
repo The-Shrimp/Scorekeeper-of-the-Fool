@@ -35,10 +35,14 @@ def _has_council_role(member: discord.Member) -> bool:
 # Uses your guild cache; if user not found, fall back to ID string.
 # If you later migrate aliases into SQLite, this is where you'd swap lookup logic.
 def display_name_for_id(guild: discord.Guild, discord_id: int) -> str:
+    alias = db.get_alias(discord_id)
+    if alias:
+        return alias
     m = guild.get_member(discord_id)
     if m:
-        return m.display_name  # your scoreboard will use alias later if desired
+        return m.display_name
     return f"User({discord_id})"
+
 
 def parse_mentions_to_ids(members: list[discord.Member]) -> list[int]:
     # dedupe by id while keeping order
