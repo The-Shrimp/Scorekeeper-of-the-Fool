@@ -1,24 +1,21 @@
 """
-schedule.py
-Schedule CSV creation and updates.
-
-Purpose:
-- Maintain one schedule CSV per split.
-- Ensure every Saturday exists as a row.
-- Update a specific Saturday’s details.
-- Maintain Attendees / Possible Attendees lists.
-
-Best practice:
-- All schedule CSV reads/writes live here, so changes are localized.
+schedule.py (Polars)
+Split schedule CSV creation and updates (no pandas/numpy).
 """
 
 import os
 import calendar
-import pandas as pd
+import polars as pl
 from datetime import datetime, date, timedelta
 import discord
 
-from constants import GAME_NIGHT_ROLE_NAME, ANNOUNCEMENT_CHANNEL_NAME, YES_EMOJI, MAYBE_EMOJI, COUNCIL_ROLE_NAME
+from constants import (
+    GAME_NIGHT_ROLE_NAME,
+    ANNOUNCEMENT_CHANNEL_NAME,
+    YES_EMOJI,
+    MAYBE_EMOJI,
+    COUNCIL_ROLE_NAME,
+)
 from utils_split import determine_split, schedule_filename_for
 from utils_time import get_upcoming_saturday_at_default_time, parse_time_input
 from aliases import get_alias_for_member
@@ -28,8 +25,10 @@ SCHEDULE_COLUMNS = [
     "Attendees", "Possible Attendees", "Afterwards Comments"
 ]
 
+def _empty_schedule_df() -> pl.DataFrame:
+    return pl.DataFrame({c: pl.Series([], dtype=pl.Utf8) for c in SCHEDULE_COLUMNS})
+
 def generate_saturdays_for_split(year: int, split: str):
-    """Yield all Saturdays in the given year's split."""
     if split == "Split1":
         start_month, end_month = 1, 6
     else:
@@ -47,17 +46,24 @@ def generate_saturdays_for_split(year: int, split: str):
         cur += timedelta(days=7)
 
 def ensure_schedule_file_for_date(target_date: date) -> str:
-    """Ensure the split schedule file exists and contains all Saturdays in that split."""
     date_str = target_date.strftime("%m/%d/%Y")
     split = determine_split(date_str)
     file_name = schedule_filename_for(target_date)
 
     if os.path.exists(file_name):
-        df = pd.read_csv(file_name, dtype=str)
+        try:
+            df = pl.read_csv(file_name, dtypes={c: pl.Utf8 for c in SCHEDULE_COLUMNS}, infer_schema_length=0)
+        except Exception:
+            df = _empty_schedule_df()
     else:
-        df = pd.DataFrame(columns=SCHEDULE_COLUMNS)
+        df = _empty_schedule_df()
 
-    existing_dates = set(df["Date"].tolist()) if "Date" in df.columns else set()
+    # Ensure all columns exist
+    for c in SCHEDULE_COLUMNS:
+        if c not in df.columns:
+            df = df.with_columns(pl.lit("").cast(pl.Utf8).alias(c))
+
+    existing_dates = set(df["Date"].to_list()) if df.height > 0 else set()
 
     new_rows = []
     for sat in generate_saturdays_for_split(target_date.year, split):
@@ -75,14 +81,17 @@ def ensure_schedule_file_for_date(target_date: date) -> str:
             })
 
     if new_rows:
-        df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
+        df = pl.concat([df, pl.DataFrame(new_rows)], how="vertical")
 
-    if not df.empty:
-        df = df.drop_duplicates(subset=["Date"])
-        df["_sort_date"] = df["Date"].apply(lambda s: datetime.strptime(s, "%m/%d/%Y"))
-        df = df.sort_values(by="_sort_date").drop(columns=["_sort_date"])
+    if df.height > 0:
+        # Deduplicate by Date (keep first)
+        df = df.unique(subset=["Date"], keep="first")
+        # Sort by actual date
+        df = df.with_columns(
+            pl.col("Date").str.strptime(pl.Date, format="%m/%d/%Y", strict=False).alias("_sort_date")
+        ).sort("_sort_date").drop("_sort_date")
 
-    df.to_csv(file_name, index=False)
+    df.write_csv(file_name)
     return file_name
 
 def update_schedule_entry(
@@ -95,15 +104,12 @@ def update_schedule_entry(
     possible_attendees: str = None,
     afterwards_comments: str = None,
 ):
-    """Update a single row in the schedule CSV for target_date."""
     schedule_file = ensure_schedule_file_for_date(target_date)
-    df = pd.read_csv(schedule_file, dtype=str)
+    df = pl.read_csv(schedule_file, dtypes={c: pl.Utf8 for c in SCHEDULE_COLUMNS}, infer_schema_length=0)
 
     date_str = target_date.strftime("%m/%d/%Y")
-    mask = df["Date"] == date_str
-
-    if not mask.any():
-        df = pd.concat([df, pd.DataFrame([{
+    if df.filter(pl.col("Date") == date_str).height == 0:
+        df = pl.concat([df, pl.DataFrame([{
             "Date": date_str,
             "Status": "Undecided",
             "Time": "5 PM",
@@ -112,27 +118,25 @@ def update_schedule_entry(
             "Attendees": "",
             "Possible Attendees": "",
             "Afterwards Comments": "",
-        }])], ignore_index=True)
-        mask = df["Date"] == date_str
+        }])], how="vertical")
 
-    idx = df.index[mask][0]
+    def _set(col, val):
+        nonlocal df
+        if val is None:
+            return
+        df = df.with_columns(
+            pl.when(pl.col("Date") == date_str).then(pl.lit(str(val))).otherwise(pl.col(col)).alias(col)
+        )
 
-    if status is not None:
-        df.at[idx, "Status"] = status
-    if time_str is not None:
-        df.at[idx, "Time"] = time_str
-    if location is not None:
-        df.at[idx, "Location"] = location
-    if notes is not None:
-        df.at[idx, "Notes"] = notes
-    if attendees is not None:
-        df.at[idx, "Attendees"] = attendees
-    if possible_attendees is not None:
-        df.at[idx, "Possible Attendees"] = possible_attendees
-    if afterwards_comments is not None:
-        df.at[idx, "Afterwards Comments"] = afterwards_comments
+    _set("Status", status)
+    _set("Time", time_str)
+    _set("Location", location)
+    _set("Notes", notes)
+    _set("Attendees", attendees)
+    _set("Possible Attendees", possible_attendees)
+    _set("Afterwards Comments", afterwards_comments)
 
-    df.to_csv(schedule_file, index=False)
+    df.write_csv(schedule_file)
 
 def parse_list_field(text: str) -> list:
     if not isinstance(text, str) or not text.strip():
@@ -140,20 +144,20 @@ def parse_list_field(text: str) -> list:
     return [x.strip() for x in text.split(",") if x.strip()]
 
 def join_list_field(items: list) -> str:
+    # preserve stable order by sorting; remove duplicates
     return ", ".join(sorted(set(items)))
 
 def update_schedule_attendance_for_member(target_date: date, member: discord.Member, status: str):
-    """status: 'yes', 'maybe', 'none'"""
     schedule_file = ensure_schedule_file_for_date(target_date)
-    df = pd.read_csv(schedule_file, dtype=str)
+    df = pl.read_csv(schedule_file, dtypes={c: pl.Utf8 for c in SCHEDULE_COLUMNS}, infer_schema_length=0)
+
     date_str = target_date.strftime("%m/%d/%Y")
-    mask = df["Date"] == date_str
-    if not mask.any():
+    row = df.filter(pl.col("Date") == date_str)
+    if row.height == 0:
         return
 
-    idx = df.index[mask][0]
-    attendees = parse_list_field(df.at[idx, "Attendees"])
-    maybes = parse_list_field(df.at[idx, "Possible Attendees"])
+    attendees = parse_list_field(row["Attendees"][0])
+    maybes = parse_list_field(row["Possible Attendees"][0])
     label = get_alias_for_member(member)
 
     attendees = [x for x in attendees if x != label]
@@ -164,18 +168,20 @@ def update_schedule_attendance_for_member(target_date: date, member: discord.Mem
     elif status == "maybe":
         maybes.append(label)
 
-    df.at[idx, "Attendees"] = join_list_field(attendees)
-    df.at[idx, "Possible Attendees"] = join_list_field(maybes)
-    df.to_csv(schedule_file, index=False)
+    attendees_str = join_list_field(attendees)
+    maybes_str = join_list_field(maybes)
+
+    df = df.with_columns(
+        pl.when(pl.col("Date") == date_str).then(pl.lit(attendees_str)).otherwise(pl.col("Attendees")).alias("Attendees"),
+        pl.when(pl.col("Date") == date_str).then(pl.lit(maybes_str)).otherwise(pl.col("Possible Attendees")).alias("Possible Attendees"),
+    )
+    df.write_csv(schedule_file)
 
 def _has_council_role(member: discord.Member) -> bool:
     return any(r.name == COUNCIL_ROLE_NAME for r in getattr(member, "roles", []))
 
 def register(bot):
-    @bot.tree.command(
-        name="schedulegamenight",
-        description="Schedule a game night announcement and update the schedule CSV.",
-    )
+    @bot.tree.command(name="schedulegamenight", description="Schedule a game night announcement and update the schedule CSV.")
     async def schedule_gamenight(
         interaction: discord.Interaction,
         date: str = None,
@@ -195,37 +201,30 @@ def register(bot):
         guild = interaction.guild
         target_channel = discord.utils.get(guild.text_channels, name=ANNOUNCEMENT_CHANNEL_NAME)
         if target_channel is None:
-            await interaction.response.send_message(
-                f"I could not find a channel named `#{ANNOUNCEMENT_CHANNEL_NAME}`.",
-                ephemeral=True,
-            )
+            await interaction.response.send_message(f"I could not find a channel named `#{ANNOUNCEMENT_CHANNEL_NAME}`.", ephemeral=True)
             return
 
         role = discord.utils.get(guild.roles, name=GAME_NIGHT_ROLE_NAME)
 
+        # Default date = upcoming Saturday at 5pm
         if not date or not date.strip():
             base_dt = get_upcoming_saturday_at_default_time()
         else:
             try:
                 dt_date = datetime.strptime(date.strip(), "%m/%d/%Y").date()
             except ValueError:
-                await interaction.response.send_message(
-                    "Please provide the date in `MM/DD/YYYY` format, e.g. `12/07/2024`.",
-                    ephemeral=True,
-                )
+                await interaction.response.send_message("Please provide the date in `MM/DD/YYYY` format.", ephemeral=True)
                 return
             base_dt = datetime(dt_date.year, dt_date.month, dt_date.day, 17, 0)
 
+        # Default time = 5pm, else parse
         if not time or not time.strip():
             final_dt = base_dt
             final_time_display = base_dt.strftime("%I:%M %p").lstrip("0")
         else:
             display, hour, minute = parse_time_input(time)
             if display is None:
-                await interaction.response.send_message(
-                    "I couldn't understand that time. Examples: `5pm`, `7:30 pm`, `19:00`.",
-                    ephemeral=True,
-                )
+                await interaction.response.send_message("Time examples: `5pm`, `7:30 pm`, `19:00`.", ephemeral=True)
                 return
             final_dt = base_dt.replace(hour=hour, minute=minute)
             final_time_display = display
@@ -246,8 +245,7 @@ def register(bot):
         role_mention = role.mention if role else "@Game Night"
         message_text = (
             f"Hello {role_mention}\n"
-            f"I would like to extend an invitation to another wonderful Game Night on "
-            f"**{final_date_str}** at **{final_time_display}**.\n\n"
+            f"I would like to extend an invitation to another wonderful Game Night on **{final_date_str}** at **{final_time_display}**\n\n"
             f"Location: {location_val}\n"
             f"Attire: {attire_val}\n"
             f"Other Notes: {notes_val}\n\n"
@@ -266,7 +264,6 @@ def register(bot):
         await msg.add_reaction(MAYBE_EMOJI)
 
         await interaction.response.send_message(
-            f"Game night scheduled on **{final_date_str}** at **{final_time_display}** "
-            f"and announcement posted in {target_channel.mention}.",
+            f"Game night scheduled on **{final_date_str}** at **{final_time_display}** and posted in {target_channel.mention}.",
             ephemeral=True,
         )
