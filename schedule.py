@@ -14,6 +14,7 @@ from constants import (
     ANNOUNCEMENT_CHANNEL_NAME,
     YES_EMOJI,
     MAYBE_EMOJI,
+    NO_EMOJI,
     COUNCIL_ROLE_NAME,
 )
 from utils_split import determine_split, schedule_filename_for
@@ -22,7 +23,7 @@ from aliases import get_alias_for_member
 
 SCHEDULE_COLUMNS = [
     "Date", "Status", "Time", "Location", "Notes",
-    "Attendees", "Possible Attendees", "Afterwards Comments"
+    "Attendees", "Possible Attendees", "Unavailable", "Afterwards Comments"
 ]
 
 def _empty_schedule_df() -> pl.DataFrame:
@@ -77,6 +78,7 @@ def ensure_schedule_file_for_date(target_date: date) -> str:
                 "Notes": "None",
                 "Attendees": "",
                 "Possible Attendees": "",
+                "Unavailable": "",
                 "Afterwards Comments": "",
             })
 
@@ -102,6 +104,7 @@ def update_schedule_entry(
     notes: str = None,
     attendees: str = None,
     possible_attendees: str = None,
+    unavailable: str = None,
     afterwards_comments: str = None,
 ):
     schedule_file = ensure_schedule_file_for_date(target_date)
@@ -117,6 +120,7 @@ def update_schedule_entry(
             "Notes": "None",
             "Attendees": "",
             "Possible Attendees": "",
+            "Unavailable": "",
             "Afterwards Comments": "",
         }])], how="vertical")
 
@@ -134,6 +138,7 @@ def update_schedule_entry(
     _set("Notes", notes)
     _set("Attendees", attendees)
     _set("Possible Attendees", possible_attendees)
+    _set("Unavailable", unavailable)
     _set("Afterwards Comments", afterwards_comments)
 
     df.write_csv(schedule_file)
@@ -158,22 +163,28 @@ def update_schedule_attendance_for_member(target_date: date, member: discord.Mem
 
     attendees = parse_list_field(row["Attendees"][0])
     maybes = parse_list_field(row["Possible Attendees"][0])
+    unavailables = parse_list_field(row["Unavailable"][0] if "Unavailable" in row.columns else "")
     label = get_alias_for_member(member)
 
     attendees = [x for x in attendees if x != label]
     maybes = [x for x in maybes if x != label]
+    unavailables = [x for x in unavailables if x != label]
 
     if status == "yes":
         attendees.append(label)
     elif status == "maybe":
         maybes.append(label)
+    elif status == "unavailable":
+        unavailables.append(label)
 
     attendees_str = join_list_field(attendees)
     maybes_str = join_list_field(maybes)
+    unavailables_str = join_list_field(unavailables)
 
     df = df.with_columns(
         pl.when(pl.col("Date") == date_str).then(pl.lit(attendees_str)).otherwise(pl.col("Attendees")).alias("Attendees"),
         pl.when(pl.col("Date") == date_str).then(pl.lit(maybes_str)).otherwise(pl.col("Possible Attendees")).alias("Possible Attendees"),
+        pl.when(pl.col("Date") == date_str).then(pl.lit(unavailables_str)).otherwise(pl.col("Unavailable")).alias("Unavailable"),
     )
     df.write_csv(schedule_file)
 
@@ -251,9 +262,10 @@ def register(bot):
             f"Other Notes: {notes_val}\n\n"
             "I hope to see you there!\n\n"
             "*You can react to this message with*\n"
-            f"{YES_EMOJI} *to confirm your attendance or*\n"
-            f"{MAYBE_EMOJI} *as most likely*.\n"
-            "If you select this, please let your host know beforehand if you cannot make it, "
+            f"{YES_EMOJI} *to confirm your attendance,*\n"
+            f"{MAYBE_EMOJI} *if you're not sure yet, or*\n"
+            f"{NO_EMOJI} *if you cannot make it.*\n"
+            "If you are unsure, please let your host know beforehand if you cannot make it, "
             "so that we can save on supplies and plan appropriate games for this Game Night.\n\n"
             "Thank you,\n"
             "and we hope to see you there!"
@@ -262,6 +274,7 @@ def register(bot):
         msg = await target_channel.send(message_text)
         await msg.add_reaction(YES_EMOJI)
         await msg.add_reaction(MAYBE_EMOJI)
+        await msg.add_reaction(NO_EMOJI)
 
         await interaction.response.send_message(
             f"Game night scheduled on **{final_date_str}** at **{final_time_display}** and posted in {target_channel.mention}.",

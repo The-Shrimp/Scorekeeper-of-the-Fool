@@ -1,23 +1,35 @@
-I am the **Scorekeeper of the Fools**, the diligent chronicler of games played and points scored. It is my solemn duty to track each daring venture and, at the split's end, crown the fools who dare to play. Let the games begin, and may the cleverest fool win!
+I am the **Scorekeeper of the Fools** — the diligent chronicler of games played, hours endured, and victories claimed. Each split I track who showed up, how long they played, and who walked away with the points. At the season's end, I crown the fool who played the cleverest — not just the most.
 
-Here are the commands you can use to interact with me:
+**How scoring works:**
+The competitive system runs in two splits per year — Split 1 (January–June) and Split 2 (July–December). Every game logged earns points based on how long it ran, how many players competed, and how many won. At the end of each split, the leaderboard ranks eligible players using a shrinkage-adjusted efficiency score that rewards consistent play over lucky one-off wins.
 
-1. **Update Score**
-   - `/updatescore <player_name> <amount> <game_name> [date] [notes]`
-     - **Description**: Update the score for a player. If no date is provided, today's date will be used.
-     - **Example**: `/updatescore JohnDoe 5 Chess "06/01/2024" "Great match!"`
+---
 
-2. **Display Scoreboard**
-   - `/scoreboard [year] [split]`
-     - **Description**: Displays the scoreboard for a specified year and split. If no parameters are provided, the current year and split will be used.
-     - **Example**: `/scoreboard 2024 1`
+**Active Commands:**
 
-3. **Display Scoreboard Leaders**
-   - `/scoreboardleaders`
-     - **Description**: Shows the top players and the runner-up for the current split.
-     - **Example**: `/scoreboardleaders`
+**Logging & Leaderboard**
+- `/loggame game: minutes: players: winners: [date] [notes]` — Log a completed game (Council only)
+- `/leaderboard` — View the current split standings
+- `/mystats` — View your own stats for this split
+- `/stats <player>` — View another player's stats
+- `/splitstats` — View aggregate split summary (total games, hours, top games)
 
-4. **Player Stats**
-   - `/stats <player_name> [year] [split]`
-     - **Description**: Shows detailed statistics for a player, including total points, best game, and game nights attended. If year and split are not specified, it uses the current year and split.
-     - **Example**: `/stats JohnDoe 2024 1`
+**Scheduling**
+- `/schedulegamenight [date] [time] [attire] [location] [notes]` — Post a game night announcement with RSVP reactions (Council only)
+
+**Aliases**
+- `/setalias <alias>` — Set the display name that appears in leaderboards and announcements
+
+**Admin / Council Only**
+- `/undo_last` — Move the most recent game to review (recoverable)
+- `/undo <game_id>` — Move a specific game to review by ID
+- `/recover <game_id>` — Restore a game from review back to the leaderboard
+- `/addgame <name>` — Register a canonical game name for normalization
+- `/renamegame <old_name> <new_name>` — Rename a game and update all historical records
+
+**Legacy (Archival)**
+The following commands access historical scoring data from 2024–2025. They are read-only for most splits.
+- `/scoreboard <year> <split>` — View legacy scores for a past split
+- `/scoreboardleaders` — View legacy leaders for the current split
+- `/legacystats <player> [year] [split]` — View a player's legacy stats
+- `/updatescore <player> <amount> <game> [date] [notes]` — Append a legacy score entry

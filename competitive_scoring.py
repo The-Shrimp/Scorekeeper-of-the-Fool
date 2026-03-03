@@ -212,11 +212,15 @@ def register(bot: commands.Bot) -> None:
         local_date_str = local_d.isoformat()
         notes_text = (notes or "").strip()
 
+        raw_game_name = game.strip()
+        normalized_game_name = db.normalize_game_name(raw_game_name)
+        normalization_note = f"\n*(normalized from \"{raw_game_name}\")*" if normalized_game_name != raw_game_name else ""
+
         game_id = db.insert_game_instance(
             timestamp_utc=timestamp_utc,
             local_date=local_date_str,
             split_id=split_id,
-            game_name=game.strip(),
+            game_name=normalized_game_name,
             duration_min=comp.duration_min,
             players=player_ids,
             winners=winner_ids,
@@ -229,6 +233,14 @@ def register(bot: commands.Bot) -> None:
             message_id=None,
         )
 
+        db.write_audit(
+            action="INSERT_GAME",
+            actor_id=str(interaction.user.id),
+            target_id=str(game_id),
+            payload={"game_name": normalized_game_name, "split_id": split_id, "duration_min": comp.duration_min,
+                     "players": player_ids, "winners": winner_ids},
+        )
+
         # Build clean summary (no pings)
         guild = interaction.guild
         winner_names = ", ".join(display_name_for_id(guild, wid) for wid in winner_ids)
@@ -238,7 +250,7 @@ def register(bot: commands.Bot) -> None:
         points_disp = engine.display_points(comp.points_per_winner)
 
         msg = (
-            f"**Logged Game #{game_id}** — {game.strip()}\n"
+            f"**Logged Game #{game_id}** — {normalized_game_name}{normalization_note}\n"
             f"Date: {local_d.strftime('%m/%d/%Y')} | Duration: {comp.duration_min} min{review_note}\n"
             f"Players ({len(player_ids)}): {all_names}\n"
             f"Winner(s) ({len(winner_ids)}): {winner_names}\n"
@@ -292,11 +304,15 @@ def register(bot: commands.Bot) -> None:
         # Find eligibility and adjusted metrics if eligible
         eligible_row = next((r for r in ranked if int(r["discord_id"]) == user_id), None)
 
+        detail = engine.compute_player_detail(user_id, rows)
         name = display_name_for_id(interaction.guild, user_id)
         pts = engine.display_points(s.total_points)
         hrs = f"{s.hours:.1f}"
         nights = str(s.nights_attended)
         raw_eff = f"{s.raw_efficiency:.2f}"
+        win_rate = f"{detail['win_rate'] * 100:.0f}%"
+        pts_per_night = engine.display_points(s.total_points / s.nights_attended) if s.nights_attended > 0 else "0"
+        most_played = detail["most_played_game"]
 
         eligible = (s.hours >= cfg.MIN_ELIGIBLE_HOURS and s.nights_attended >= cfg.MIN_ELIGIBLE_NIGHTS)
         if eligible and eligible_row:
@@ -316,6 +332,8 @@ def register(bot: commands.Bot) -> None:
         msg = (
             f"**{name} — Stats ({split_id})**\n"
             f"Points: **{pts}** | Hours: **{hrs}** | Nights: **{nights}**\n"
+            f"Games played: {detail['games_played']} | Wins: {detail['wins']} | Win rate: {win_rate}\n"
+            f"Points per night: {pts_per_night} | Most played: {most_played}\n"
             f"Raw efficiency: {raw_eff} pts/hr\n"
             f"Adjusted efficiency: {e_adj} pts/hr\n"
             f"AdjustedTotal: {adj_total}\n"
@@ -324,6 +342,31 @@ def register(bot: commands.Bot) -> None:
         )
 
         await interaction.response.send_message(msg, ephemeral=True)
+
+    @bot.tree.command(name="splitstats", description="Show aggregate stats for the current split.")
+    async def splitstats(interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+
+        split_id = current_split_id()
+        rows = db.fetch_game_instances_for_split(split_id)
+
+        if not rows:
+            await interaction.response.send_message(f"No games logged yet for split {split_id}.", ephemeral=True)
+            return
+
+        summary = engine.compute_split_summary(rows)
+
+        msg = (
+            f"**Split Summary — {split_id}**\n"
+            f"Total games logged: **{summary['total_games']}**\n"
+            f"Unique players: **{summary['total_players']}**\n"
+            f"Total hours played: **{summary['total_hours']:.1f}**\n"
+            f"Most played game: **{summary['most_played_game']}** ({summary['most_played_count']} times)\n"
+            f"Busiest night: **{summary['busiest_night']}** ({summary['busiest_night_games']} games)"
+        )
+        await interaction.response.send_message(msg)
 
     @bot.tree.command(name="undo_last", description="Undo the most recently logged game (Council only).")
     async def undo_last(interaction: discord.Interaction):
@@ -340,11 +383,16 @@ def register(bot: commands.Bot) -> None:
             await interaction.response.send_message("No games exist to undo in the current split.", ephemeral=True)
             return
 
-        ok = db.delete_game_instance(last_id)
-        await interaction.response.send_message(
-            f"{'✅' if ok else '❌'} Undo last: game #{last_id} {'deleted' if ok else 'not found'}.",
-            ephemeral=True
-        )
+        moved = db.move_game_to_review(last_id, str(interaction.user.id))
+        if moved:
+            db.write_audit(action="SOFT_DELETE_GAME", actor_id=str(interaction.user.id),
+                           target_id=str(last_id), payload=moved)
+            await interaction.response.send_message(
+                f"✅ Game #{last_id} moved to review (not permanently deleted). Use `/recover {last_id}` to restore it.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(f"❌ Game #{last_id} not found.", ephemeral=True)
 
     @bot.tree.command(name="undo", description="Undo a specific game_id (Council only).")
     async def undo(interaction: discord.Interaction, game_id: int):
@@ -355,8 +403,76 @@ def register(bot: commands.Bot) -> None:
             await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
             return
 
-        ok = db.delete_game_instance(int(game_id))
+        moved = db.move_game_to_review(int(game_id), str(interaction.user.id))
+        if moved:
+            db.write_audit(action="SOFT_DELETE_GAME", actor_id=str(interaction.user.id),
+                           target_id=str(game_id), payload=moved)
+            await interaction.response.send_message(
+                f"✅ Game #{game_id} moved to review (not permanently deleted). Use `/recover {game_id}` to restore it.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(f"❌ Game #{game_id} not found.", ephemeral=True)
+
+    @bot.tree.command(name="recover", description="Restore a game from review back to the leaderboard (Council only).")
+    async def recover(interaction: discord.Interaction, game_id: int):
+        if not interaction.guild:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+        if not _has_council_role(interaction.user):
+            await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+            return
+
+        restored = db.restore_game_from_review(int(game_id))
+        if restored:
+            db.write_audit(action="RECOVER_GAME", actor_id=str(interaction.user.id),
+                           target_id=str(game_id), payload=restored)
+            await interaction.response.send_message(
+                f"✅ Game #{game_id} ({restored['game_name']}, {restored['local_date']}) restored to the leaderboard.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                f"❌ Game #{game_id} not found in review. It may have already been restored or never moved.",
+                ephemeral=True,
+            )
+
+    @bot.tree.command(name="addgame", description="Register a canonical game name for normalization (Council only).")
+    async def addgame(interaction: discord.Interaction, name: str):
+        if not interaction.guild:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+        if not _has_council_role(interaction.user):
+            await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+            return
+
+        inserted = db.add_canonical_game(name.strip(), str(interaction.user.id))
+        if inserted:
+            db.write_audit(action="ADD_CANONICAL_GAME", actor_id=str(interaction.user.id),
+                           target_id=name.strip(), payload={"canonical_name": name.strip()})
+            await interaction.response.send_message(
+                f"✅ **{name.strip()}** registered as a canonical game name.", ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                f"❌ A canonical game named **{name.strip()}** already exists.", ephemeral=True
+            )
+
+    @bot.tree.command(name="renamegame", description="Rename a canonical game and update all historical records (Council only).")
+    async def renamegame(interaction: discord.Interaction, old_name: str, new_name: str):
+        if not interaction.guild:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+        if not _has_council_role(interaction.user):
+            await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+            return
+
+        updated_rows = db.rename_canonical_game(old_name.strip(), new_name.strip())
+        db.write_audit(action="RENAME_GAME", actor_id=str(interaction.user.id),
+                       target_id=old_name.strip(), payload={"old_name": old_name.strip(), "new_name": new_name.strip(),
+                                                             "records_updated": updated_rows})
         await interaction.response.send_message(
-            f"{'✅' if ok else '❌'} Undo: game #{game_id} {'deleted' if ok else 'not found'}.",
-            ephemeral=True
+            f"✅ Renamed **{old_name.strip()}** → **{new_name.strip()}**. "
+            f"{updated_rows} game record(s) updated.",
+            ephemeral=True,
         )
