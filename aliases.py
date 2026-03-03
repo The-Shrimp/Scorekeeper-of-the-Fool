@@ -97,4 +97,6 @@ def register(bot):
             return
 
         db.upsert_alias(interaction.user.id, clean)
+        db.write_audit(action="SET_ALIAS", actor_id=str(interaction.user.id),
+                       target_id=str(interaction.user.id), payload={"alias": clean})
         await interaction.response.send_message(f"Alias set to **{clean}**.", ephemeral=True)

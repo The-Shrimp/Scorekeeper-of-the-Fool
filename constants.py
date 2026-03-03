@@ -8,6 +8,7 @@ Best practice:
 
 YES_EMOJI = "✅"
 MAYBE_EMOJI = "❔"
+NO_EMOJI = "❌"
 
 ANNOUNCEMENT_CHANNEL_NAME = "game-night-announcement-board"
 GAME_NIGHT_ROLE_NAME = "Game Night"

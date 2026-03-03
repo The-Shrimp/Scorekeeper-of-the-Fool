@@ -143,6 +143,83 @@ def aggregate_split(game_rows: list[dict]) -> dict[int, PlayerSplitStats]:
         )
     return result
 
+def compute_player_detail(player_id: int, game_rows: list[dict]) -> dict:
+    """
+    Extended per-player stats derived from raw game rows.
+    Returns games_played, wins, win_rate, most_played_game, game_counts.
+    """
+    games_played = 0
+    wins = 0
+    game_counts: dict[str, int] = {}
+
+    for row in game_rows:
+        players = [int(p) for p in json.loads(row["players_json"])]
+        if player_id not in players:
+            continue
+        games_played += 1
+        game_name = str(row["game_name"])
+        game_counts[game_name] = game_counts.get(game_name, 0) + 1
+        winners = {int(w) for w in json.loads(row["winners_json"])}
+        if player_id in winners:
+            wins += 1
+
+    win_rate = wins / games_played if games_played > 0 else 0.0
+    most_played_game = max(game_counts, key=game_counts.get) if game_counts else "N/A"
+
+    return {
+        "games_played": games_played,
+        "wins": wins,
+        "win_rate": win_rate,
+        "most_played_game": most_played_game,
+        "game_counts": game_counts,
+    }
+
+
+def compute_split_summary(game_rows: list[dict]) -> dict:
+    """
+    Split-level aggregate stats for /splitstats.
+    Returns total_games, total_players, total_hours, most_played_game, busiest_night.
+    """
+    total_minutes = 0
+    all_players: set[int] = set()
+    game_counts: dict[str, int] = {}
+    date_counts: dict[str, int] = {}
+
+    for row in game_rows:
+        total_minutes += int(row["duration_min"])
+        for pid in json.loads(row["players_json"]):
+            all_players.add(int(pid))
+        game_name = str(row["game_name"])
+        game_counts[game_name] = game_counts.get(game_name, 0) + 1
+        local_date = str(row["local_date"])
+        date_counts[local_date] = date_counts.get(local_date, 0) + 1
+
+    most_played_game = max(game_counts, key=game_counts.get) if game_counts else "N/A"
+    most_played_count = game_counts.get(most_played_game, 0)
+    busiest_night_raw = max(date_counts, key=date_counts.get) if date_counts else None
+    busiest_night_games = date_counts.get(busiest_night_raw, 0) if busiest_night_raw else 0
+
+    # Format busiest night date nicely (ISO -> MM/DD/YYYY)
+    if busiest_night_raw:
+        try:
+            from datetime import datetime as _dt
+            busiest_night = _dt.strptime(busiest_night_raw, "%Y-%m-%d").strftime("%m/%d/%Y")
+        except ValueError:
+            busiest_night = busiest_night_raw
+    else:
+        busiest_night = "N/A"
+
+    return {
+        "total_games": len(game_rows),
+        "total_players": len(all_players),
+        "total_hours": total_minutes / 60.0,
+        "most_played_game": most_played_game,
+        "most_played_count": most_played_count,
+        "busiest_night": busiest_night,
+        "busiest_night_games": busiest_night_games,
+    }
+
+
 def compute_leaderboard(stats: dict[int, PlayerSplitStats]):
     """
     Returns:

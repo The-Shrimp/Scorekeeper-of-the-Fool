@@ -3,3 +3,8 @@
 aliases.csv
 data/bot.db
 data/*.db
+.claude/*
+.vscode/*
+.venv/*
+__pycache__/
+*.pyc

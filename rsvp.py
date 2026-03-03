@@ -16,7 +16,7 @@ import discord
 from datetime import datetime, date
 from typing import Optional
 
-from constants import YES_EMOJI, MAYBE_EMOJI, ANNOUNCEMENT_CHANNEL_NAME
+from constants import YES_EMOJI, MAYBE_EMOJI, NO_EMOJI, ANNOUNCEMENT_CHANNEL_NAME
 from schedule import update_schedule_attendance_for_member, update_schedule_entry
 from aliases import get_alias_for_member
 
@@ -61,6 +61,7 @@ async def reconcile_active_invitation(guild: discord.Guild):
 
     yes_members = []
     maybe_members = []
+    no_members = []
 
     for reaction in active_message.reactions:
         if str(reaction.emoji) == YES_EMOJI:
@@ -79,17 +80,30 @@ async def reconcile_active_invitation(guild: discord.Guild):
                 if member and not member.bot:
                     maybe_members.append(member)
 
+        if str(reaction.emoji) == NO_EMOJI:
+            async for user in reaction.users():
+                if user.bot:
+                    continue
+                member = await _get_member(guild, user.id)
+                if member and not member.bot:
+                    no_members.append(member)
+
+    # Priority: yes > maybe > unavailable (mutual exclusion)
     yes_ids = {m.id for m in yes_members}
     maybe_members = [m for m in maybe_members if m.id not in yes_ids]
+    maybe_ids = {m.id for m in maybe_members}
+    no_members = [m for m in no_members if m.id not in yes_ids and m.id not in maybe_ids]
 
     attendees = ", ".join(get_alias_for_member(m) for m in yes_members)
     possible = ", ".join(get_alias_for_member(m) for m in maybe_members)
+    unavailable = ", ".join(get_alias_for_member(m) for m in no_members)
 
     update_schedule_entry(
         target_date=active_date,
         status="Scheduled",
         attendees=attendees,
         possible_attendees=possible,
+        unavailable=unavailable,
     )
 
     print(f"[startup] Reconciled invite {active_date.strftime('%m/%d/%Y')} "
@@ -102,7 +116,7 @@ def register(bot):
             return
 
         emoji_str = str(payload.emoji)
-        if emoji_str not in {YES_EMOJI, MAYBE_EMOJI}:
+        if emoji_str not in {YES_EMOJI, MAYBE_EMOJI, NO_EMOJI}:
             return
 
         guild = bot.get_guild(payload.guild_id)
@@ -125,12 +139,20 @@ def register(bot):
         if member is None or member.bot:
             return
 
-        status = "yes" if emoji_str == YES_EMOJI else "maybe"
+        if emoji_str == YES_EMOJI:
+            status = "yes"
+            competing = {MAYBE_EMOJI, NO_EMOJI}
+        elif emoji_str == MAYBE_EMOJI:
+            status = "maybe"
+            competing = {YES_EMOJI, NO_EMOJI}
+        else:
+            status = "unavailable"
+            competing = {YES_EMOJI, MAYBE_EMOJI}
+
         update_schedule_attendance_for_member(target_date, member, status)
 
-        other_emoji = MAYBE_EMOJI if emoji_str == YES_EMOJI else YES_EMOJI
         for reaction in message.reactions:
-            if str(reaction.emoji) == other_emoji:
+            if str(reaction.emoji) in competing:
                 async for user in reaction.users():
                     if user.id == member.id:
                         await message.remove_reaction(reaction.emoji, user)
@@ -142,7 +164,7 @@ def register(bot):
             return
 
         emoji_str = str(payload.emoji)
-        if emoji_str not in {YES_EMOJI, MAYBE_EMOJI}:
+        if emoji_str not in {YES_EMOJI, MAYBE_EMOJI, NO_EMOJI}:
             return
 
         guild = bot.get_guild(payload.guild_id)
@@ -167,19 +189,24 @@ def register(bot):
 
         has_yes = False
         has_maybe = False
+        has_no = False
 
         for reaction in message.reactions:
-            if str(reaction.emoji) in {YES_EMOJI, MAYBE_EMOJI}:
+            if str(reaction.emoji) in {YES_EMOJI, MAYBE_EMOJI, NO_EMOJI}:
                 async for user in reaction.users():
                     if user.id == member.id:
                         if str(reaction.emoji) == YES_EMOJI:
                             has_yes = True
-                        else:
+                        elif str(reaction.emoji) == MAYBE_EMOJI:
                             has_maybe = True
+                        elif str(reaction.emoji) == NO_EMOJI:
+                            has_no = True
 
         if has_yes:
             update_schedule_attendance_for_member(target_date, member, "yes")
         elif has_maybe:
             update_schedule_attendance_for_member(target_date, member, "maybe")
+        elif has_no:
+            update_schedule_attendance_for_member(target_date, member, "unavailable")
         else:
             update_schedule_attendance_for_member(target_date, member, "none")
