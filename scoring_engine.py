@@ -178,24 +178,32 @@ def compute_player_detail(player_id: int, game_rows: list[dict]) -> dict:
 def compute_split_summary(game_rows: list[dict]) -> dict:
     """
     Split-level aggregate stats for /splitstats.
-    Returns total_games, total_players, total_hours, most_played_game, busiest_night.
+    Returns total_games, total_players, total_hours, most played by count,
+    most played by collective time, and busiest night.
     """
     total_minutes = 0
     all_players: set[int] = set()
     game_counts: dict[str, int] = {}
+    game_minutes: dict[str, int] = {}
     date_counts: dict[str, int] = {}
 
     for row in game_rows:
-        total_minutes += int(row["duration_min"])
+        dur = int(row["duration_min"])
+        total_minutes += dur
         for pid in json.loads(row["players_json"]):
             all_players.add(int(pid))
         game_name = str(row["game_name"])
         game_counts[game_name] = game_counts.get(game_name, 0) + 1
+        game_minutes[game_name] = game_minutes.get(game_name, 0) + dur
         local_date = str(row["local_date"])
         date_counts[local_date] = date_counts.get(local_date, 0) + 1
 
     most_played_game = max(game_counts, key=game_counts.get) if game_counts else "N/A"
     most_played_count = game_counts.get(most_played_game, 0)
+
+    most_time_game = max(game_minutes, key=game_minutes.get) if game_minutes else "N/A"
+    most_time_hours = game_minutes.get(most_time_game, 0) / 60.0 if most_time_game != "N/A" else 0.0
+
     busiest_night_raw = max(date_counts, key=date_counts.get) if date_counts else None
     busiest_night_games = date_counts.get(busiest_night_raw, 0) if busiest_night_raw else 0
 
@@ -215,6 +223,8 @@ def compute_split_summary(game_rows: list[dict]) -> dict:
         "total_hours": total_minutes / 60.0,
         "most_played_game": most_played_game,
         "most_played_count": most_played_count,
+        "most_time_game": most_time_game,
+        "most_time_hours": most_time_hours,
         "busiest_night": busiest_night,
         "busiest_night_games": busiest_night_games,
     }
