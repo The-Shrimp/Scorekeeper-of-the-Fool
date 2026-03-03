@@ -201,8 +201,13 @@ def build_splitstats_embed(split_id: str, summary: dict) -> discord.Embed:
     embed.add_field(name="Unique Players", value=str(summary["total_players"]),   inline=True)
     embed.add_field(name="Total Hours",    value=f"{summary['total_hours']:.1f}", inline=True)
     embed.add_field(
-        name="Most Played",
+        name="Most Played (by games)",
         value=f"{summary['most_played_game']} ({summary['most_played_count']}×)",
+        inline=True,
+    )
+    embed.add_field(
+        name="Most Played (by time)",
+        value=f"{summary['most_time_game']} ({summary['most_time_hours']:.1f}h)",
         inline=True,
     )
     embed.add_field(
