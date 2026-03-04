@@ -30,6 +30,14 @@ def connect() -> sqlite3.Connection:
 
 def init_db() -> None:
     with connect() as conn:
+        def ensure_column(table: str, column: str, ddl: str) -> None:
+            cols = {
+                str(r["name"])
+                for r in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if column not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
         conn.execute("""
         CREATE TABLE IF NOT EXISTS game_instances (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,12 +54,16 @@ def init_db() -> None:
             notes TEXT,
             logged_by TEXT NOT NULL,
             channel_id TEXT,
-            message_id TEXT
+            message_id TEXT,
+            supersedes_game_id INTEGER,
+            superseded_by_game_id INTEGER
         );
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_game_split ON game_instances(split_id);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_game_local_date ON game_instances(local_date);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_game_logged_by ON game_instances(logged_by);")
+        ensure_column("game_instances", "supersedes_game_id", "INTEGER")
+        ensure_column("game_instances", "superseded_by_game_id", "INTEGER")
 
         # Aliases in DB (DiscordID -> Alias)
         conn.execute("""
@@ -82,9 +94,13 @@ def init_db() -> None:
             channel_id TEXT,
             message_id TEXT,
             deleted_at_utc TEXT NOT NULL,
-            deleted_by TEXT NOT NULL
+            deleted_by TEXT NOT NULL,
+            supersedes_game_id INTEGER,
+            superseded_by_game_id INTEGER
         );
         """)
+        ensure_column("game_instances_review", "supersedes_game_id", "INTEGER")
+        ensure_column("game_instances_review", "superseded_by_game_id", "INTEGER")
 
         # Audit log: every write operation recorded here
         conn.execute("""
@@ -116,6 +132,58 @@ def init_db() -> None:
         );
         """)
 
+        # Scheduling tables
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS game_nights (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date_iso TEXT UNIQUE NOT NULL,
+            split_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'Undecided',
+            time_str TEXT,
+            location TEXT,
+            notes TEXT,
+            afterwards_comments TEXT,
+            created_at_utc TEXT NOT NULL
+        );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_game_nights_split ON game_nights(split_id);")
+
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS rsvps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date_iso TEXT NOT NULL,
+            discord_id TEXT NOT NULL,
+            rsvp_status TEXT NOT NULL,
+            updated_at_utc TEXT NOT NULL,
+            UNIQUE(date_iso, discord_id)
+        );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rsvps_date ON rsvps(date_iso);")
+
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS derived_attendance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date_iso TEXT NOT NULL,
+            discord_id TEXT NOT NULL,
+            source TEXT NOT NULL,
+            source_ref TEXT,
+            updated_at_utc TEXT NOT NULL,
+            UNIQUE(date_iso, discord_id, source, source_ref)
+        );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_derived_attendance_date ON derived_attendance(date_iso);")
+
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS alias_reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date_iso TEXT NOT NULL,
+            discord_id TEXT NOT NULL,
+            reminded_at_utc TEXT NOT NULL,
+            UNIQUE(date_iso, discord_id)
+        );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_alias_reminders_date ON alias_reminders(date_iso);")
+
 
 # ---------------------------
 # Game Instances
@@ -137,6 +205,8 @@ def insert_game_instance(
     logged_by: int,
     channel_id: Optional[int],
     message_id: Optional[int],
+    supersedes_game_id: Optional[int] = None,
+    superseded_by_game_id: Optional[int] = None,
 ) -> int:
     players_json = json.dumps(players)
     winners_json = json.dumps(winners)
@@ -146,15 +216,18 @@ def insert_game_instance(
             INSERT INTO game_instances (
                 timestamp_utc, local_date, split_id, game_name, duration_min,
                 players_json, winners_json, pool_points, points_per_winner,
-                review_flag, notes, logged_by, channel_id, message_id
+                review_flag, notes, logged_by, channel_id, message_id,
+                supersedes_game_id, superseded_by_game_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             timestamp_utc, local_date, split_id, game_name, duration_min,
             players_json, winners_json, pool_points, points_per_winner,
             review_flag, notes, str(logged_by),
             str(channel_id) if channel_id else None,
-            str(message_id) if message_id else None
+            str(message_id) if message_id else None,
+            supersedes_game_id,
+            superseded_by_game_id,
         ))
         return int(cur.lastrowid)
 
@@ -169,12 +242,12 @@ def get_last_game_instance_id(split_id: Optional[str] = None) -> Optional[int]:
     with connect() as conn:
         if split_id:
             row = conn.execute(
-                "SELECT id FROM game_instances WHERE split_id = ? ORDER BY id DESC LIMIT 1",
+                "SELECT id FROM game_instances WHERE split_id = ? AND superseded_by_game_id IS NULL ORDER BY id DESC LIMIT 1",
                 (split_id,),
             ).fetchone()
         else:
             row = conn.execute(
-                "SELECT id FROM game_instances ORDER BY id DESC LIMIT 1"
+                "SELECT id FROM game_instances WHERE superseded_by_game_id IS NULL ORDER BY id DESC LIMIT 1"
             ).fetchone()
         return int(row["id"]) if row else None
 
@@ -182,11 +255,86 @@ def get_last_game_instance_id(split_id: Optional[str] = None) -> Optional[int]:
 def fetch_game_instances_for_split(split_id: str) -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM game_instances WHERE split_id = ? ORDER BY id ASC",
+            "SELECT * FROM game_instances WHERE split_id = ? AND superseded_by_game_id IS NULL ORDER BY id ASC",
             (split_id,),
         ).fetchall()
 
     return [dict(r) for r in rows]
+
+
+def fetch_game_instance_by_id(game_id: int) -> Optional[dict[str, Any]]:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM game_instances WHERE id = ?",
+            (game_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def create_replacement_game(
+    *,
+    original_game_id: int,
+    timestamp_utc: str,
+    local_date: str,
+    split_id: str,
+    game_name: str,
+    duration_min: int,
+    players: list[int],
+    winners: list[int],
+    pool_points: float,
+    points_per_winner: float,
+    review_flag: int,
+    notes: str,
+    logged_by: int,
+    channel_id: Optional[int],
+    message_id: Optional[int],
+) -> Optional[int]:
+    """
+    Atomically create a replacement game row and mark the original as superseded.
+    Returns the replacement id, or None if the original does not exist / is already superseded.
+    """
+    players_json = json.dumps(players)
+    winners_json = json.dumps(winners)
+
+    with connect() as conn:
+        original = conn.execute(
+            "SELECT id, superseded_by_game_id FROM game_instances WHERE id = ?",
+            (original_game_id,),
+        ).fetchone()
+        if original is None or original["superseded_by_game_id"] is not None:
+            return None
+
+        cur = conn.execute("""
+            INSERT INTO game_instances (
+                timestamp_utc, local_date, split_id, game_name, duration_min,
+                players_json, winners_json, pool_points, points_per_winner,
+                review_flag, notes, logged_by, channel_id, message_id,
+                supersedes_game_id, superseded_by_game_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            timestamp_utc, local_date, split_id, game_name, duration_min,
+            players_json, winners_json, pool_points, points_per_winner,
+            review_flag, notes, str(logged_by),
+            str(channel_id) if channel_id else None,
+            str(message_id) if message_id else None,
+            int(original_game_id),
+            None,
+        ))
+        replacement_id = int(cur.lastrowid)
+
+        link = conn.execute(
+            """
+            UPDATE game_instances
+            SET superseded_by_game_id = ?
+            WHERE id = ? AND superseded_by_game_id IS NULL
+            """,
+            (replacement_id, original_game_id),
+        )
+        if link.rowcount != 1:
+            raise sqlite3.IntegrityError(f"Failed to supersede game #{original_game_id}")
+
+    return replacement_id
 
 
 # ---------------------------
@@ -202,21 +350,33 @@ def move_game_to_review(game_id: int, deleted_by_discord_id: str) -> Optional[di
         ).fetchone()
         if row is None:
             return None
+        existing_review = conn.execute(
+            "SELECT id FROM game_instances_review WHERE id = ?", (game_id,)
+        ).fetchone()
+        if existing_review is not None:
+            return None
         row_dict = dict(row)
+        if row_dict.get("superseded_by_game_id") is not None:
+            return None
+        if row_dict.get("supersedes_game_id") is not None:
+            conn.execute(
+                "UPDATE game_instances SET superseded_by_game_id = NULL WHERE id = ?",
+                (row_dict["supersedes_game_id"],),
+            )
         conn.execute("""
             INSERT INTO game_instances_review (
                 id, timestamp_utc, local_date, split_id, game_name, duration_min,
                 players_json, winners_json, pool_points, points_per_winner,
                 review_flag, notes, logged_by, channel_id, message_id,
-                deleted_at_utc, deleted_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                deleted_at_utc, deleted_by, supersedes_game_id, superseded_by_game_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             row_dict["id"], row_dict["timestamp_utc"], row_dict["local_date"],
             row_dict["split_id"], row_dict["game_name"], row_dict["duration_min"],
             row_dict["players_json"], row_dict["winners_json"], row_dict["pool_points"],
             row_dict["points_per_winner"], row_dict["review_flag"], row_dict["notes"],
             row_dict["logged_by"], row_dict["channel_id"], row_dict["message_id"],
-            now_utc, deleted_by_discord_id,
+            now_utc, deleted_by_discord_id, row_dict.get("supersedes_game_id"), row_dict.get("superseded_by_game_id"),
         ))
         conn.execute("DELETE FROM game_instances WHERE id = ?", (game_id,))
     return row_dict
@@ -230,20 +390,34 @@ def restore_game_from_review(game_id: int) -> Optional[dict]:
         ).fetchone()
         if row is None:
             return None
+        active = conn.execute(
+            "SELECT id FROM game_instances WHERE id = ?", (game_id,)
+        ).fetchone()
+        if active is not None:
+            return None
         row_dict = dict(row)
-        conn.execute("""
-            INSERT OR IGNORE INTO game_instances (
+        cur = conn.execute("""
+            INSERT INTO game_instances (
                 id, timestamp_utc, local_date, split_id, game_name, duration_min,
                 players_json, winners_json, pool_points, points_per_winner,
-                review_flag, notes, logged_by, channel_id, message_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                review_flag, notes, logged_by, channel_id, message_id,
+                supersedes_game_id, superseded_by_game_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             row_dict["id"], row_dict["timestamp_utc"], row_dict["local_date"],
             row_dict["split_id"], row_dict["game_name"], row_dict["duration_min"],
             row_dict["players_json"], row_dict["winners_json"], row_dict["pool_points"],
             row_dict["points_per_winner"], row_dict["review_flag"], row_dict["notes"],
             row_dict["logged_by"], row_dict["channel_id"], row_dict["message_id"],
+            row_dict.get("supersedes_game_id"), row_dict.get("superseded_by_game_id"),
         ))
+        if cur.rowcount != 1:
+            raise sqlite3.IntegrityError(f"Failed to restore game #{game_id}")
+        if row_dict.get("supersedes_game_id") is not None:
+            conn.execute(
+                "UPDATE game_instances SET superseded_by_game_id = ? WHERE id = ?",
+                (game_id, row_dict["supersedes_game_id"]),
+            )
         conn.execute("DELETE FROM game_instances_review WHERE id = ?", (game_id,))
     return row_dict
 
@@ -255,6 +429,37 @@ def fetch_review_games_for_split(split_id: str) -> list[dict[str, Any]]:
             (split_id,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def fetch_review_games(limit: int = 10) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM game_instances_review ORDER BY deleted_at_utc DESC, id DESC LIMIT ?",
+            (max(1, int(limit)),),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def fetch_review_game(game_id: int) -> Optional[dict[str, Any]]:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM game_instances_review WHERE id = ?",
+            (game_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def mark_game_superseded(original_game_id: int, replacement_game_id: int) -> bool:
+    with connect() as conn:
+        cur = conn.execute(
+            """
+            UPDATE game_instances
+            SET superseded_by_game_id = ?
+            WHERE id = ? AND superseded_by_game_id IS NULL
+            """,
+            (replacement_game_id, original_game_id),
+        )
+        return cur.rowcount == 1
 
 
 # ---------------------------
@@ -271,8 +476,44 @@ def write_audit(action: str, actor_id: str, target_id: str = None, payload: dict
                 INSERT INTO audit_log (timestamp_utc, actor_discord_id, action, target_id, payload_json)
                 VALUES (?, ?, ?, ?, ?)
             """, (now_utc, str(actor_id), action, str(target_id) if target_id is not None else None, payload_json))
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[audit] Failed to write {action}: {exc}")
+
+
+def fetch_audit_for_game(game_id: int, limit: int = 25) -> list[dict[str, Any]]:
+    """
+    Return recent audit rows related to a specific game id, including edit lineage references.
+    """
+    target = int(game_id)
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?",
+            (max(50, int(limit) * 4),),
+        ).fetchall()
+
+    matched: list[dict[str, Any]] = []
+    for row in rows:
+        row_dict = dict(row)
+        payload = None
+        if row_dict.get("payload_json"):
+            try:
+                payload = json.loads(str(row_dict["payload_json"]))
+            except Exception:
+                payload = None
+
+        is_match = False
+        if row_dict.get("target_id") == str(target):
+            is_match = True
+        elif isinstance(payload, dict):
+            if payload.get("original_game_id") == target or payload.get("replacement_game_id") == target:
+                is_match = True
+
+        if is_match:
+            matched.append(row_dict)
+            if len(matched) >= max(1, int(limit)):
+                break
+
+    return matched
 
 
 # ---------------------------
@@ -389,3 +630,228 @@ def rename_canonical_game(old_name: str, new_name: str) -> int:
             (new_name.strip(), old_name.strip()),
         )
         return cur.rowcount
+
+
+# ---------------------------
+# Game Nights (Scheduling)
+# ---------------------------
+
+def upsert_game_night(
+    date_iso: str,
+    split_id: str,
+    status: str = None,
+    time_str: str = None,
+    location: str = None,
+    notes: str = None,
+    afterwards_comments: str = None,
+) -> None:
+    """
+    Create a game_nights row if it doesn't exist, then update any provided fields.
+    None values leave the existing column unchanged.
+    """
+    now_utc = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    with connect() as conn:
+        conn.execute("""
+            INSERT OR IGNORE INTO game_nights
+                (date_iso, split_id, status, time_str, location, notes, afterwards_comments, created_at_utc)
+            VALUES (?, ?, 'Undecided', NULL, NULL, NULL, NULL, ?)
+        """, (date_iso, split_id, now_utc))
+
+        updates = []
+        params: list = []
+        for col, val in [
+            ("status", status),
+            ("time_str", time_str),
+            ("location", location),
+            ("notes", notes),
+            ("afterwards_comments", afterwards_comments),
+        ]:
+            if val is not None:
+                updates.append(f"{col} = ?")
+                params.append(val)
+
+        if updates:
+            params.append(date_iso)
+            conn.execute(
+                f"UPDATE game_nights SET {', '.join(updates)} WHERE date_iso = ?",
+                params,
+            )
+
+
+def get_game_night_by_date(date_iso: str) -> Optional[dict]:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM game_nights WHERE date_iso = ?", (date_iso,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def fetch_game_nights_for_split(split_id: str) -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM game_nights WHERE split_id = ? ORDER BY date_iso ASC",
+            (split_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def fetch_all_game_nights() -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM game_nights ORDER BY date_iso ASC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------
+# RSVPs
+# ---------------------------
+
+def upsert_rsvp(date_iso: str, discord_id: str, rsvp_status: str) -> None:
+    """Insert or update a player's RSVP for a game night."""
+    now_utc = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    with connect() as conn:
+        conn.execute("""
+            INSERT INTO rsvps (date_iso, discord_id, rsvp_status, updated_at_utc)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(date_iso, discord_id) DO UPDATE SET
+                rsvp_status = excluded.rsvp_status,
+                updated_at_utc = excluded.updated_at_utc
+        """, (date_iso, str(discord_id), rsvp_status, now_utc))
+
+
+def get_rsvps_for_night(date_iso: str) -> list[dict]:
+    """Return all RSVP rows for a given date (excluding 'none' status)."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM rsvps WHERE date_iso = ? AND rsvp_status != 'none' ORDER BY discord_id ASC",
+            (date_iso,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def replace_rsvps_for_night(date_iso: str, statuses_by_user: dict[str, str]) -> None:
+    """
+    Replace the RSVP snapshot for a night with the provided exact set of statuses.
+    Intended for startup reconciliation from the authoritative Discord message state.
+    """
+    now_utc = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    with connect() as conn:
+        conn.execute("DELETE FROM rsvps WHERE date_iso = ?", (date_iso,))
+        for discord_id, status in statuses_by_user.items():
+            if not status or status == "none":
+                continue
+            conn.execute(
+                """
+                INSERT INTO rsvps (date_iso, discord_id, rsvp_status, updated_at_utc)
+                VALUES (?, ?, ?, ?)
+                """,
+                (date_iso, str(discord_id), status, now_utc),
+            )
+
+
+def record_alias_reminder_if_new(date_iso: str, discord_id: str) -> bool:
+    """
+    Record that a reminder DM was sent for this user on this game-night date.
+    Returns True only when this call created the reminder record.
+    """
+    now_utc = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    with connect() as conn:
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO alias_reminders (date_iso, discord_id, reminded_at_utc)
+            VALUES (?, ?, ?)
+            """,
+            (date_iso, str(discord_id), now_utc),
+        )
+        return cur.rowcount == 1
+
+
+# ---------------------------
+# Attendance Resolution
+# ---------------------------
+
+def resolve_night_attendance(date_iso: str) -> str:
+    """
+    Backward-compatible wrapper around the derived-attendance recompute path.
+    """
+    result = recompute_night_attendance(date_iso)
+    return str(result["status"])
+
+
+def recompute_night_attendance(date_iso: str) -> dict[str, Any]:
+    """
+    Rebuild derived attendance for the night from active game logs.
+    RSVP rows remain user intent only and are not overwritten here.
+    """
+    now_utc = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    with connect() as conn:
+        game_rows = conn.execute(
+            "SELECT id, split_id, players_json FROM game_instances WHERE local_date = ? ORDER BY id ASC",
+            (date_iso,),
+        ).fetchall()
+        existing = conn.execute(
+            "SELECT status FROM game_nights WHERE date_iso = ?",
+            (date_iso,),
+        ).fetchone()
+        if existing is None:
+            split_id = str(game_rows[0]["split_id"]) if game_rows else ""
+            conn.execute("""
+                INSERT INTO game_nights
+                    (date_iso, split_id, status, time_str, location, notes, afterwards_comments, created_at_utc)
+                VALUES (?, ?, 'Undecided', NULL, NULL, NULL, NULL, ?)
+            """, (date_iso, split_id, now_utc))
+            existing = {"status": "Undecided"}
+        conn.execute("DELETE FROM derived_attendance WHERE date_iso = ?", (date_iso,))
+
+        players_who_played: set[str] = set()
+        for row in game_rows:
+            source_ref = str(row["id"])
+            for pid in json.loads(row["players_json"]):
+                did = str(pid)
+                players_who_played.add(did)
+                conn.execute("""
+                    INSERT INTO derived_attendance (date_iso, discord_id, source, source_ref, updated_at_utc)
+                    VALUES (?, ?, 'game_log', ?, ?)
+                """, (date_iso, did, source_ref, now_utc))
+
+        yes_count = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM rsvps WHERE date_iso = ? AND rsvp_status = 'yes'",
+            (date_iso,),
+        ).fetchone()["cnt"]
+        games_played = len(game_rows)
+
+        if games_played > 0:
+            new_status = "Scheduled"
+        elif existing["status"] == "Cancelled":
+            new_status = "Cancelled"
+        elif yes_count > 0:
+            new_status = "Social Night"
+        else:
+            new_status = "Undecided"
+
+        conn.execute(
+            "UPDATE game_nights SET status = ? WHERE date_iso = ?",
+            (new_status, date_iso),
+        )
+
+    return {
+        "status": new_status,
+        "games_played": games_played,
+        "attended_count": len(players_who_played),
+        "attended_ids": sorted(players_who_played),
+    }
+
+
+def get_derived_attendance_for_night(date_iso: str) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT date_iso, discord_id, source, source_ref, updated_at_utc
+            FROM derived_attendance
+            WHERE date_iso = ?
+            ORDER BY discord_id ASC, source_ref ASC
+            """,
+            (date_iso,),
+        ).fetchall()
+    return [dict(r) for r in rows]

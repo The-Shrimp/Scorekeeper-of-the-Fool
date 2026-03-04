@@ -1,0 +1,108 @@
+**Scorekeeper of the Fool - Discord Command Guide**
+
+Use this as a paste-ready guide in Discord.
+
+**Council Commands:**
+
+`/schedulegamenight [date] [time] [attire] [location] [notes]`
+- Posts the weekly game night invite and enables RSVP reactions.
+- Date format: `MM/DD/YYYY`
+- Time examples: `5pm`, `7:30 pm`, `19:00`
+
+`/loggame game:<name> minutes:<int> players:<roster> winners:<roster> [date] [notes]`
+- Logs a scored game for the active split.
+- `players` and `winners` accept `@mentions` or comma-separated aliases/display names.
+- Date format: `MM/DD/YYYY`
+- Example: `/loggame game:"Clue" minutes:47 players:"@A, Shrimp, Snake" winners:"Shrimp" notes:"Final round"`
+
+`/editgame <game_id> [game] [minutes] [players] [winners] [date] [notes]`
+- Creates a corrected replacement record without changing the original row.
+- Any omitted field is copied from the original game.
+- Use this instead of delete-and-relog when fixing a mistake.
+
+`/undo_last`
+- Moves the most recent active game in the current split to review.
+
+`/undo <game_id>`
+- Moves a specific active game to review.
+
+`/recover <game_id>`
+- Restores a game from review back into active scoring.
+
+`/reviewqueue [limit]`
+- Shows recently removed games currently waiting in review.
+
+`/reviewgame <game_id>`
+- Shows the full details of a soft-deleted game, including correction lineage.
+
+`/gameinfo <game_id>`
+- Shows the full details of an active game, including correction lineage.
+
+`/auditgame <game_id> [limit]`
+- Shows recent audit entries tied to a game, including immutable edit links.
+
+`/addgame <name>`
+- Registers a canonical game name.
+
+`/mapgamealias <raw_name> <canonical_name>`
+- Maps a typed variant to a canonical game name.
+- Example: `/mapgamealias "clue classic" "Clue"`
+
+`/renamegame <old_name> <new_name>`
+- Renames a canonical game and updates active historical records.
+
+`/scoring_help`
+- Shows the quick scoring workflow for council members.
+
+`/audit_help`
+- Shows the correction/review workflow for council members.
+
+**Player Commands:**
+
+`/leaderboard`
+- Shows the current split leaderboard.
+
+`/mystats`
+- Shows your current split stats.
+
+`/stats <player>`
+- Shows another player's current split stats.
+
+`/splitstats`
+- Shows aggregate split stats.
+
+`/setalias <alias>`
+- Sets your display alias for scorekeeping and RSVPs.
+
+`/introductions`
+- Shows the introduction message for the bot.
+
+`/updatescore <name> <amount> <game> [date] [notes]`
+- Legacy scoring command kept for archival use.
+
+`/scoreboardleaders`
+- Legacy leaderboard command.
+
+`/scoreboard <year> <split>`
+- Legacy split scoreboard command.
+
+`/legacystats <name> [year] [split]`
+- Legacy player stats command.
+
+**Recommended Council Workflow:**
+
+1. Schedule the night with `/schedulegamenight`.
+2. Make sure players set aliases with `/setalias` if needed.
+3. Log each game with `/loggame`.
+4. If a row is wrong, prefer `/editgame`.
+5. If a row must be removed entirely, use `/undo`, then inspect with `/reviewgame`.
+6. Use `/recover` only when a removed row should be active again.
+
+**Recommended Audit Workflow:**
+
+1. Use `/gameinfo <id>` to inspect the active record.
+2. Use `/auditgame <id>` to inspect the recent mutation trail.
+3. Use `/reviewqueue` to see what has been removed.
+4. Use `/reviewgame <id>` to inspect a removed record before restoring it.
+5. Use `/editgame` for corrections so the old record remains in history.
+6. Use `/undo` only when the row should leave active scoring entirely.
