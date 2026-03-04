@@ -19,12 +19,14 @@ import discord
 from discord.ext import commands
 from datetime import datetime, date as date_type
 from typing import Optional
+import json
 
 import scoring_config as cfg
 from constants import COUNCIL_ROLE_NAME
 from split_ids import split_id_for_date, current_split_id
 import db
 import scoring_engine as engine
+import aliases
 
 # --- Permissions ---
 
@@ -67,6 +69,49 @@ def parse_date_override(date_str: Optional[str]) -> Optional[date_type]:
         return datetime.strptime(date_str.strip(), "%m/%d/%Y").date()
     except ValueError:
         return None
+
+
+def resolve_roster_ids(guild: discord.Guild, raw_value: str) -> tuple[list[int], list[str]]:
+    """
+    Resolve a roster field using @mentions and alias/display-name lookup.
+    Non-mention names should be comma-separated so multi-word aliases still work.
+    """
+    members, unresolved = aliases.resolve_aliases_to_members(guild, raw_value)
+    return parse_mentions_to_ids(members), unresolved
+
+
+def ids_from_json(raw_json: str) -> list[int]:
+    return [int(v) for v in json.loads(raw_json or "[]")]
+
+
+def format_lineage(row: dict) -> str:
+    parts = []
+    if row.get("supersedes_game_id") is not None:
+        parts.append(f"supersedes #{row['supersedes_game_id']}")
+    if row.get("superseded_by_game_id") is not None:
+        parts.append(f"superseded by #{row['superseded_by_game_id']}")
+    return ", ".join(parts) if parts else "Original record"
+
+
+def format_audit_entry(entry: dict) -> str:
+    parts = [f"#{entry['id']}", str(entry["action"]), str(entry["timestamp_utc"])]
+    if entry.get("actor_discord_id"):
+        parts.append(f"by {entry['actor_discord_id']}")
+
+    payload = None
+    if entry.get("payload_json"):
+        try:
+            payload = json.loads(str(entry["payload_json"]))
+        except Exception:
+            payload = None
+
+    if isinstance(payload, dict):
+        if payload.get("original_game_id") is not None and payload.get("replacement_game_id") is not None:
+            parts.append(
+                f"orig #{payload['original_game_id']} -> repl #{payload['replacement_game_id']}"
+            )
+
+    return " | ".join(parts)
 
 def _trunc(s: str, n: int) -> str:
     """Truncate to n chars with ellipsis."""
@@ -288,11 +333,12 @@ def register(bot: commands.Bot) -> None:
         - use a string field and parse <@id> patterns, OR
         - use multiple fixed "player1, player2, ..." params.
 
-        For simplicity and to preserve your “@mentions only” preference,
-        we’ll parse mentions from the raw string fields (players/winners) containing @mentions.
+        This implementation accepts:
+        - @mentions, or
+        - comma-separated aliases / display names / usernames.
 
         Usage example:
-        /loggame game:"Clue" minutes:47 players:"@A @B @C" winners:"@A" notes:"..."
+        /loggame game:"Clue" minutes:47 players:"@A @B, Shrimp" winners:"@A" notes:"..."
         """
         if not interaction.guild:
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
@@ -314,21 +360,23 @@ def register(bot: commands.Bot) -> None:
         # Round minutes
         rounded_minutes = engine.round_minutes_to_nearest_15(minutes)
 
-        # Parse mentions out of the provided strings
-        import re
-        def extract_ids(s: str) -> list[int]:
-            ids = re.findall(r"<@!?(\d+)>", s or "")
-            out = []
-            seen = set()
-            for x in ids:
-                v = int(x)
-                if v not in seen:
-                    out.append(v)
-                    seen.add(v)
-            return out
+        player_ids, unresolved_players = resolve_roster_ids(interaction.guild, players)
+        if unresolved_players:
+            unresolved_text = ", ".join(unresolved_players)
+            await interaction.response.send_message(
+                f"Could not resolve player(s): {unresolved_text}. Use @mentions or comma-separated aliases/display names.",
+                ephemeral=True,
+            )
+            return
 
-        player_ids = extract_ids(players)
-        winner_ids = extract_ids(winners)
+        winner_ids, unresolved_winners = resolve_roster_ids(interaction.guild, winners)
+        if unresolved_winners:
+            unresolved_text = ", ".join(unresolved_winners)
+            await interaction.response.send_message(
+                f"Could not resolve winner(s): {unresolved_text}. Use @mentions or comma-separated aliases/display names.",
+                ephemeral=True,
+            )
+            return
 
         err = engine.validate_game_instance(player_ids, winner_ids, rounded_minutes)
         if err:
@@ -369,6 +417,9 @@ def register(bot: commands.Bot) -> None:
             payload={"game_name": normalized_game_name, "split_id": split_id, "duration_min": comp.duration_min,
                      "players": player_ids, "winners": winner_ids},
         )
+
+        # Recompute derived attendance for the night from active game logs
+        db.recompute_night_attendance(local_date_str)
 
         embed = build_loggame_embed(
             game_id=game_id,
@@ -464,6 +515,7 @@ def register(bot: commands.Bot) -> None:
 
         moved = db.move_game_to_review(last_id, str(interaction.user.id))
         if moved:
+            db.recompute_night_attendance(str(moved["local_date"]))
             db.write_audit(action="SOFT_DELETE_GAME", actor_id=str(interaction.user.id),
                            target_id=str(last_id), payload=moved)
             await interaction.response.send_message(
@@ -484,6 +536,7 @@ def register(bot: commands.Bot) -> None:
 
         moved = db.move_game_to_review(int(game_id), str(interaction.user.id))
         if moved:
+            db.recompute_night_attendance(str(moved["local_date"]))
             db.write_audit(action="SOFT_DELETE_GAME", actor_id=str(interaction.user.id),
                            target_id=str(game_id), payload=moved)
             await interaction.response.send_message(
@@ -504,6 +557,7 @@ def register(bot: commands.Bot) -> None:
 
         restored = db.restore_game_from_review(int(game_id))
         if restored:
+            db.recompute_night_attendance(str(restored["local_date"]))
             db.write_audit(action="RECOVER_GAME", actor_id=str(interaction.user.id),
                            target_id=str(game_id), payload=restored)
             await interaction.response.send_message(
@@ -515,6 +569,134 @@ def register(bot: commands.Bot) -> None:
                 f"❌ Game #{game_id} not found in review. It may have already been restored or never moved.",
                 ephemeral=True,
             )
+
+    @bot.tree.command(name="editgame", description="Create a corrected replacement for an existing game (Council only).")
+    async def editgame(
+        interaction: discord.Interaction,
+        game_id: int,
+        game: Optional[str] = None,
+        minutes: Optional[int] = None,
+        players: Optional[str] = None,
+        winners: Optional[str] = None,
+        date: Optional[str] = None,
+        notes: Optional[str] = None,
+    ):
+        if not interaction.guild:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+        if not _has_council_role(interaction.user):
+            await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+            return
+
+        original = db.fetch_game_instance_by_id(int(game_id))
+        if not original:
+            await interaction.response.send_message(f"❌ Game #{game_id} not found.", ephemeral=True)
+            return
+        if original.get("superseded_by_game_id") is not None:
+            await interaction.response.send_message(
+                f"❌ Game #{game_id} has already been superseded by game #{original['superseded_by_game_id']}.",
+                ephemeral=True,
+            )
+            return
+
+        override_date = parse_date_override(date)
+        if date and override_date is None:
+            await interaction.response.send_message("Invalid date format. Use MM/DD/YYYY.", ephemeral=True)
+            return
+
+        if players is not None:
+            player_ids, unresolved_players = resolve_roster_ids(interaction.guild, players)
+            if unresolved_players:
+                unresolved_text = ", ".join(unresolved_players)
+                await interaction.response.send_message(
+                    f"Could not resolve player(s): {unresolved_text}. Use @mentions or comma-separated aliases/display names.",
+                    ephemeral=True,
+                )
+                return
+        else:
+            player_ids = ids_from_json(str(original["players_json"]))
+
+        if winners is not None:
+            winner_ids, unresolved_winners = resolve_roster_ids(interaction.guild, winners)
+            if unresolved_winners:
+                unresolved_text = ", ".join(unresolved_winners)
+                await interaction.response.send_message(
+                    f"Could not resolve winner(s): {unresolved_text}. Use @mentions or comma-separated aliases/display names.",
+                    ephemeral=True,
+                )
+                return
+        else:
+            winner_ids = ids_from_json(str(original["winners_json"]))
+
+        base_minutes = int(original["duration_min"])
+        rounded_minutes = base_minutes if minutes is None else engine.round_minutes_to_nearest_15(minutes)
+
+        err = engine.validate_game_instance(player_ids, winner_ids, rounded_minutes)
+        if err:
+            await interaction.response.send_message(err, ephemeral=True)
+            return
+
+        if override_date is not None:
+            local_d = override_date
+        else:
+            local_d = datetime.strptime(str(original["local_date"]), "%Y-%m-%d").date()
+        split_id = split_id_for_date(local_d)
+
+        raw_game_name = (game.strip() if game is not None else str(original["game_name"]))
+        normalized_game_name = db.normalize_game_name(raw_game_name)
+        notes_text = str(original["notes"] or "") if notes is None else notes.strip()
+
+        comp = engine.compute_points(rounded_minutes, p=len(player_ids), w=len(winner_ids))
+        replacement_id = db.create_replacement_game(
+            original_game_id=int(game_id),
+            timestamp_utc=datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+            local_date=local_d.isoformat(),
+            split_id=split_id,
+            game_name=normalized_game_name,
+            duration_min=comp.duration_min,
+            players=player_ids,
+            winners=winner_ids,
+            pool_points=comp.pool_points,
+            points_per_winner=comp.points_per_winner,
+            review_flag=comp.review_flag,
+            notes=notes_text,
+            logged_by=interaction.user.id,
+            channel_id=interaction.channel_id,
+            message_id=None,
+        )
+        if replacement_id is None:
+            await interaction.response.send_message(
+                f"❌ Game #{game_id} could not be superseded. No replacement was linked.",
+                ephemeral=True,
+            )
+            return
+
+        old_date = str(original["local_date"])
+        new_date = local_d.isoformat()
+        db.recompute_night_attendance(old_date)
+        if new_date != old_date:
+            db.recompute_night_attendance(new_date)
+
+        db.write_audit(
+            action="EDIT_GAME",
+            actor_id=str(interaction.user.id),
+            target_id=str(replacement_id),
+            payload={
+                "original_game_id": int(game_id),
+                "replacement_game_id": replacement_id,
+                "game_name": normalized_game_name,
+                "split_id": split_id,
+                "duration_min": comp.duration_min,
+                "players": player_ids,
+                "winners": winner_ids,
+                "local_date": new_date,
+            },
+        )
+
+        await interaction.response.send_message(
+            f"✅ Game #{game_id} superseded by game #{replacement_id}. The replacement is now the active record.",
+            ephemeral=True,
+        )
 
     @bot.tree.command(name="addgame", description="Register a canonical game name for normalization (Council only).")
     async def addgame(interaction: discord.Interaction, name: str):
@@ -536,6 +718,166 @@ def register(bot: commands.Bot) -> None:
             await interaction.response.send_message(
                 f"❌ A canonical game named **{name.strip()}** already exists.", ephemeral=True
             )
+
+    @bot.tree.command(name="mapgamealias", description="Map a raw game name to a canonical game name (Council only).")
+    async def mapgamealias(interaction: discord.Interaction, raw_name: str, canonical_name: str):
+        if not interaction.guild:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+        if not _has_council_role(interaction.user):
+            await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+            return
+
+        error = db.map_game_alias(raw_name.strip(), canonical_name.strip(), str(interaction.user.id))
+        if error:
+            await interaction.response.send_message(f"❌ {error}", ephemeral=True)
+            return
+
+        db.write_audit(
+            action="MAP_GAME_ALIAS",
+            actor_id=str(interaction.user.id),
+            target_id=raw_name.strip(),
+            payload={"raw_name": raw_name.strip(), "canonical_name": canonical_name.strip()},
+        )
+        await interaction.response.send_message(
+            f"✅ Mapped **{raw_name.strip()}** to **{canonical_name.strip()}**.",
+            ephemeral=True,
+        )
+
+    @bot.tree.command(name="reviewqueue", description="List recently soft-deleted games waiting in review (Council only).")
+    async def reviewqueue(interaction: discord.Interaction, limit: Optional[int] = 10):
+        if not interaction.guild:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+        if not _has_council_role(interaction.user):
+            await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+            return
+
+        rows = db.fetch_review_games(limit=limit or 10)
+        if not rows:
+            await interaction.response.send_message("No games are currently in review.", ephemeral=True)
+            return
+
+        lines = []
+        for row in rows:
+            lines.append(
+                f"#{row['id']}  {row['local_date']}  {row['game_name']}  deleted by {row['deleted_by']}"
+            )
+
+        await interaction.response.send_message(
+            _code("\n".join(lines)),
+            ephemeral=True,
+        )
+
+    @bot.tree.command(name="reviewgame", description="Show the details of a soft-deleted game (Council only).")
+    async def reviewgame(interaction: discord.Interaction, game_id: int):
+        if not interaction.guild:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+        if not _has_council_role(interaction.user):
+            await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+            return
+
+        row = db.fetch_review_game(int(game_id))
+        if not row:
+            await interaction.response.send_message(f"❌ Game #{game_id} is not in review.", ephemeral=True)
+            return
+
+        player_names = ", ".join(
+            display_name_for_id(interaction.guild, int(pid))
+            for pid in json.loads(row["players_json"])
+        ) or "—"
+        winner_names = ", ".join(
+            display_name_for_id(interaction.guild, int(pid))
+            for pid in json.loads(row["winners_json"])
+        ) or "—"
+
+        embed = discord.Embed(
+            title=f"Review Game #{row['id']}",
+            description=f"**{row['game_name']}** on {row['local_date']}",
+            color=_ORANGE,
+        )
+        embed.add_field(name="Players", value=player_names, inline=False)
+        embed.add_field(name="Winners", value=winner_names, inline=False)
+        embed.add_field(name="Duration", value=f"{row['duration_min']} min", inline=True)
+        embed.add_field(name="Pts / Winner", value=engine.display_points(float(row["points_per_winner"])), inline=True)
+        embed.add_field(name="Lineage", value=format_lineage(row), inline=False)
+        embed.add_field(name="Deleted", value=f"{row['deleted_at_utc']} by {row['deleted_by']}", inline=False)
+        if row.get("notes"):
+            embed.add_field(name="Notes", value=str(row["notes"]), inline=False)
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @bot.tree.command(name="gameinfo", description="Show the details and correction lineage for an active game (Council only).")
+    async def gameinfo(interaction: discord.Interaction, game_id: int):
+        if not interaction.guild:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+        if not _has_council_role(interaction.user):
+            await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+            return
+
+        row = db.fetch_game_instance_by_id(int(game_id))
+        if not row:
+            review_row = db.fetch_review_game(int(game_id))
+            if review_row:
+                await interaction.response.send_message(
+                    f"Game #{game_id} is currently in review. Use `/reviewgame {game_id}`.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(f"❌ Game #{game_id} not found.", ephemeral=True)
+            return
+
+        player_names = ", ".join(
+            display_name_for_id(interaction.guild, int(pid))
+            for pid in ids_from_json(str(row["players_json"]))
+        ) or "—"
+        winner_names = ", ".join(
+            display_name_for_id(interaction.guild, int(pid))
+            for pid in ids_from_json(str(row["winners_json"]))
+        ) or "—"
+
+        embed = discord.Embed(
+            title=f"Game #{row['id']}",
+            description=f"**{row['game_name']}** on {row['local_date']}",
+            color=_TEAL if row.get("superseded_by_game_id") is None else _ORANGE,
+        )
+        embed.add_field(name="Players", value=player_names, inline=False)
+        embed.add_field(name="Winners", value=winner_names, inline=False)
+        embed.add_field(name="Duration", value=f"{row['duration_min']} min", inline=True)
+        embed.add_field(name="Pts / Winner", value=engine.display_points(float(row["points_per_winner"])), inline=True)
+        embed.add_field(name="Pool Points", value=f"{float(row['pool_points']):.2f}", inline=True)
+        embed.add_field(name="Lineage", value=format_lineage(row), inline=False)
+        embed.add_field(
+            name="Status",
+            value="Active leaderboard record" if row.get("superseded_by_game_id") is None else "Superseded historical record",
+            inline=False,
+        )
+        if row.get("notes"):
+            embed.add_field(name="Notes", value=str(row["notes"]), inline=False)
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @bot.tree.command(name="auditgame", description="Show recent audit entries related to a game (Council only).")
+    async def auditgame(interaction: discord.Interaction, game_id: int, limit: Optional[int] = 10):
+        if not interaction.guild:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+        if not _has_council_role(interaction.user):
+            await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+            return
+
+        rows = db.fetch_audit_for_game(int(game_id), limit=limit or 10)
+        if not rows:
+            await interaction.response.send_message(
+                f"No recent audit entries found for game #{game_id}.",
+                ephemeral=True,
+            )
+            return
+
+        text = "\n".join(format_audit_entry(row) for row in rows)
+        await interaction.response.send_message(_code(text), ephemeral=True)
 
     @bot.tree.command(name="renamegame", description="Rename a canonical game and update all historical records (Council only).")
     async def renamegame(interaction: discord.Interaction, old_name: str, new_name: str):

@@ -1,352 +1,196 @@
-# Scorekeeper-of-the-Fool — Discord Game Night Bot
+# Scorekeeper-of-the-Fool
 
-A Discord bot for tracking competitive game night scores, scheduling game nights, and managing player stats across seasonal splits. Built with `discord.py`, `SQLite`, and `Polars`.
-
----
+Discord bot for tracking competitive game-night scoring, scheduling events, and managing player stats across seasonal splits. Built with `discord.py`, `SQLite`, and `Polars`.
 
 ## Features
 
-- **Competitive Scoring System** — Log games, track points via a pool-based formula with Bayesian shrinkage-adjusted rankings
-- **Seasonal Splits** — Scores are organized into Split 1 (Jan–Jun) and Split 2 (Jul–Dec) per year
-- **Scheduling & RSVP** — Schedule game nights and track attendance via ✅ / ❔ / ❌ emoji reactions (mutual exclusion enforced)
-- **Player Aliases** — Each player can set a display alias used in announcements and stats
-- **Safe Delete** — `/undo` moves games to a review table rather than permanently deleting; `/recover` restores them
-- **Audit Log** — Every write operation (game inserts, deletes, recoveries, alias changes) is persisted to an audit log
-- **Game Name Normalization** — Canonical game names registered via `/addgame`; free-text variants mapped to them at log time
-- **Expanded Stats** — Per-player win rate, most-played game, points per night; split-level summaries via `/splitstats`
-- **Legacy Scoring** — Archival CSV-based scoring system from earlier seasons, preserved in `data/legacy/`
-
----
-
-## Prerequisites
-
-- Python 3.8+
-- Discord bot token (with all intents enabled)
-- Discord server with:
-  - Role: **"Game Night Council"** (for admin commands)
-  - Role: **"Game Night"** (mentioned in announcements)
-  - Channel: **"game-night-announcement-board"**
-- Required Python packages:
-  ```
-  discord.py
-  python-dotenv
-  polars
-  ```
-
----
+- Competitive scoring with split-based leaderboards and per-player stats
+- Scheduling and RSVP tracking for game nights
+- Player aliases for cleaner display names
+- Soft-delete review flow with `/undo`, `/undo_last`, and `/recover`
+- Immutable correction flow with `/editgame`
+- Game-name normalization with canonical names and alias mapping
+- Derived attendance recomputation separated from RSVP intent
+- Council quick-reference help via `/scoring_help` and `/audit_help`
+- Legacy CSV scoring commands kept for archival use
 
 ## Setup
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/The-Shrimp/Scorekeeper-of-the-Fool.git
-   cd Scorekeeper-of-the-Fool
-   ```
+1. Clone the repository.
+2. Create a `.env` file in the project root:
 
-2. **Create a `.env` file** in the project root:
-   ```env
-   DISCORD_BOT_TOKEN=your_token_here
-   SECRET=your_secret
-   APP_ID=your_app_id
-   PUBLIC_KEY=your_public_key
-   SERVER_ID=your_guild_id
-   ```
+```env
+DISCORD_BOT_TOKEN=your_token_here
+SECRET=your_secret
+APP_ID=your_app_id
+PUBLIC_KEY=your_public_key
+SERVER_ID=your_guild_id
+```
 
-3. **Install dependencies**
-   ```bash
-   pip install discord.py python-dotenv polars
-   ```
+3. Install dependencies:
 
-4. **Run the bot**
-   ```bash
-   python bot.py
-   ```
+```bash
+pip install discord.py python-dotenv polars
+```
 
-   The SQLite database (`data/bot.db`) and all required tables are created automatically on first run.
+4. Run the bot:
 
----
+```bash
+python bot.py
+```
+
+The SQLite database at `data/bot.db` is created automatically on first run.
 
 ## Commands
 
-### Competitive Scoring (2026+ System)
+### Competitive Scoring
 
 | Command | Access | Description |
 |---|---|---|
-| `/loggame game:<name> minutes:<int> players:<mentions> winners:<mentions> [date] [notes]` | Council | Log a game; name is normalized against canonical game list |
-| `/leaderboard` | Anyone | Display the current split leaderboard with eligibility and adjusted totals |
-| `/mystats` | Anyone | View your own stats: points, hours, nights, win rate, most played game, pts/night |
-| `/stats <player>` | Anyone | View another player's stats for the current split |
-| `/splitstats` | Anyone | Aggregate split summary: total games, players, hours, most played game, busiest night |
-| `/undo <game_id>` | Council | Soft-delete a game by ID (moved to review table, recoverable) |
-| `/undo_last` | Council | Soft-delete the most recent game in the current split |
-| `/recover <game_id>` | Council | Restore a game from the review table back to the leaderboard |
+| `/loggame game:<name> minutes:<int> players:<roster> winners:<roster> [date] [notes]` | Council | Log a game. Rosters accept `@mentions` or comma-separated aliases/display names. |
+| `/editgame <game_id> [game] [minutes] [players] [winners] [date] [notes]` | Council | Create an immutable corrected replacement for an existing game. |
+| `/leaderboard` | Anyone | Show the current split leaderboard. |
+| `/mystats` | Anyone | Show your current split stats. |
+| `/stats <player>` | Anyone | Show another player's current split stats. |
+| `/splitstats` | Anyone | Show aggregate split stats. |
+| `/undo <game_id>` | Council | Move an active game to review. |
+| `/undo_last` | Council | Move the most recent active game in the current split to review. |
+| `/recover <game_id>` | Council | Restore a reviewed game to active scoring. |
+| `/reviewqueue [limit]` | Council | List recently soft-deleted games in review. |
+| `/reviewgame <game_id>` | Council | Inspect a soft-deleted game in detail. |
+| `/gameinfo <game_id>` | Council | Inspect a game record and its correction lineage. |
+| `/auditgame <game_id> [limit]` | Council | Show recent audit entries related to a game id. |
 
 ### Game Name Normalization
 
 | Command | Access | Description |
 |---|---|---|
-| `/addgame <name>` | Council | Register a canonical game name for normalization |
-| `/renamegame <old_name> <new_name>` | Council | Rename a canonical game and update all historical records |
+| `/addgame <name>` | Council | Register a canonical game name. |
+| `/mapgamealias <raw_name> <canonical_name>` | Council | Map a typed variant to a canonical game name. |
+| `/renamegame <old_name> <new_name>` | Council | Rename a canonical game and update active historical records. |
 
-### Scheduling & RSVP
+### Scheduling and RSVP
 
 | Command | Access | Description |
 |---|---|---|
-| `/schedulegamenight [date] [time] [attire] [location] [notes]` | Council | Post a game night announcement with ✅ / ❔ / ❌ RSVP reactions |
-
-Reactions are mutually exclusive — adding one removes any conflicting reaction the user previously set. Attendance is synced to the schedule CSV both live and on bot startup via reconciliation.
+| `/schedulegamenight [date] [time] [attire] [location] [notes]` | Council | Post the weekly game-night invite and enable RSVP reactions. |
 
 ### Aliases
 
 | Command | Access | Description |
 |---|---|---|
-| `/setalias <alias>` | Anyone | Set your display name for game night records (stored in SQLite) |
+| `/setalias <alias>` | Anyone | Set your display alias for scorekeeping and RSVPs. |
 
-### Legacy Scoring (Archival)
+### Council Help
 
 | Command | Access | Description |
 |---|---|---|
-| `/updatescore <name> <amount> <game> [date] [notes]` | Anyone | Append a score entry to the legacy CSV |
-| `/scoreboardleaders` | Anyone | Display the top and runner-up players from legacy data |
-| `/scoreboard <year> <split>` | Anyone | Show all legacy scores for a given year and split |
-| `/legacystats <name> [year] [split]` | Anyone | View legacy stats for a player |
-
-All legacy commands respond ephemerally. Legacy data lives in `data/legacy/`.
+| `/scoring_help` | Council | Short ephemeral scoring workflow reference. |
+| `/audit_help` | Council | Short ephemeral audit/review workflow reference. |
 
 ### Informational
 
 | Command | Access | Description |
 |---|---|---|
-| `/introductions` | Anyone | Display the bot introduction message |
+| `/introductions` | Anyone | Show the introduction message. |
 
----
+### Legacy Scoring
 
-## File Map
+| Command | Access | Description |
+|---|---|---|
+| `/updatescore <name> <amount> <game> [date] [notes]` | Anyone | Append a score entry to the legacy CSV. |
+| `/scoreboardleaders` | Anyone | Show leaders from legacy data. |
+| `/scoreboard <year> <split>` | Anyone | Show all legacy scores for a given year and split. |
+| `/legacystats <name> [year] [split]` | Anyone | Show legacy player stats. |
 
-```
-Scorekeeper-of-the-Fool/
-│
-├── bot.py                        # Entry point — creates bot, registers all modules, syncs slash commands
-├── config.py                     # Loads DISCORD_BOT_TOKEN from .env
-├── constants.py                  # Shared constants: emoji (✅ ❔ ❌), channel names, role names
-│
-├── db.py                         # SQLite access layer — game_instances, aliases, review, audit log, normalization
-│
-├── aliases.py                    # /setalias command; alias resolution for player name lookups
-├── rsvp.py                       # Reaction event handlers (add/remove); startup reconciliation
-├── schedule.py                   # /schedulegamenight; schedule CSV creation and attendance tracking
-│
-├── competitive_scoring.py        # /loggame, /leaderboard, /mystats, /stats, /splitstats,
-│                                 # /undo, /undo_last, /recover, /addgame, /renamegame
-├── scoring_engine.py             # Pure scoring logic — compute_points(), aggregate_split(),
-│                                 # compute_leaderboard(), compute_player_detail(), compute_split_summary()
-├── scoring_config.py             # All tunable scoring parameters (rates, thresholds, shrinkage)
-│
-├── scoring.py                    # Legacy CSV-based scoring commands (all ephemeral)
-├── split_ids.py                  # Split ID encoding: YYYY-S1 / YYYY-S2
-├── utils_split.py                # Split membership logic (Split1: Jan–Jun, Split2: Jul–Dec)
-├── utils_time.py                 # Time parsing helpers (upcoming Saturday, parse_time_input)
-│
-├── pit.py                        # Stub — Pit board game scoring (incomplete)
-├── main_old.py                   # Deprecated monolithic version (kept for reference)
-├── introduction.txt              # Text for /introductions command
-│
-├── data/
-│   ├── bot.db                    # SQLite database (auto-created, gitignored)
-│   └── legacy/
-│       ├── 2024_Split1.csv       # Legacy scoring data
-│       ├── 2024_Split2.csv       # Legacy scoring data
-│       └── 2025_Split2.csv       # Legacy scoring data
-│
-└── 2026_Split1_gamenights.csv    # Game night schedule — 2026 Split 1
-```
+## Current Scoring Workflow
 
-### Logic Flow
+### Logging a game
 
-**Bot Startup**
-```
-bot.py
-  └── config.py                           (load .env secrets)
-  └── aliases.register()                  → db.init_db()  (creates all tables)
-  └── scoring.register()
-  └── schedule.register()
-  └── competitive_scoring.register()
-  └── rsvp.register()
-  └── bot.tree.sync()                     (sync slash commands to Discord)
-  └── rsvp.reconcile_active_invitation()  (replay missed reactions)
-```
+1. Council runs `/loggame`.
+2. The bot resolves players and winners from mentions or aliases.
+3. Minutes are rounded to the nearest 15.
+4. Points are computed and the game is written to `game_instances`.
+5. Attendance is recomputed for that date.
 
-**Logging a Game**
-```
-/loggame → competitive_scoring.loggame()
-  └── Parse player/winner mentions from strings
-  └── scoring_engine.validate_game_instance()
-  └── scoring_engine.round_minutes_to_nearest_15()
-  └── db.normalize_game_name()            (lookup canonical name; unchanged if not mapped)
-  └── scoring_engine.compute_points()     → pool & points_per_winner
-  └── db.insert_game_instance()
-  └── db.write_audit("INSERT_GAME")
-  └── Reply with game summary + ID (+ normalization note if name was remapped)
-```
+### Correcting a game
 
-**Leaderboard Generation**
-```
-/leaderboard → competitive_scoring.leaderboard()
-  └── db.fetch_game_instances_for_split(split_id)
-  └── scoring_engine.aggregate_split()       → per-player totals
-  └── scoring_engine.compute_leaderboard()   → shrinkage ranking
-  └── Display ranked table
-```
+1. Council runs `/editgame <game_id> ...`.
+2. The bot loads the original row.
+3. A replacement row is inserted with `supersedes_game_id = original`.
+4. The original row is marked with `superseded_by_game_id = replacement`.
+5. Leaderboards and stats use only non-superseded rows.
 
-**Soft Delete / Recovery**
-```
-/undo <id> → competitive_scoring.undo()
-  └── db.move_game_to_review(game_id, actor_id)
-      └── Copies row to game_instances_review (with deleted_at_utc + deleted_by)
-      └── Deletes from game_instances
-  └── db.write_audit("SOFT_DELETE_GAME")
+### Removing and restoring a game
 
-/recover <id> → competitive_scoring.recover()
-  └── db.restore_game_from_review(game_id)
-      └── Copies row back to game_instances
-      └── Deletes from game_instances_review
-  └── db.write_audit("RECOVER_GAME")
-```
+1. Council runs `/undo` or `/undo_last`.
+2. The row moves from `game_instances` to `game_instances_review`.
+3. Attendance is recomputed for that date.
+4. Council can inspect the removed row with `/reviewgame`.
+5. Council can restore it with `/recover`.
 
-**Scheduling a Game Night**
-```
-/schedulegamenight → schedule.py
-  └── ensure_schedule_file_for_date()    (create schedule CSV if needed)
-  └── update_schedule_entry()            (mark as Scheduled)
-  └── Post message in #game-night-announcement-board with ✅ / ❔ / ❌
-
-Player reacts → rsvp.on_raw_reaction_add()
-  └── Removes any competing reactions from that user
-  └── schedule.update_schedule_attendance_for_member()
-      └── Updates Attendees / Possible Attendees / Unavailable columns in CSV
-
-Player removes reaction → rsvp.on_raw_reaction_remove()
-  └── Checks remaining reactions for that user
-  └── schedule.update_schedule_attendance_for_member() with updated status (or "none")
-```
-
----
-
-## Database Schema
+## Database Notes
 
 ### `game_instances`
-Stores every logged game for the competitive scoring system.
 
-| Column | Type | Description |
-|---|---|---|
-| `id` | INTEGER PK | Unique game ID |
-| `timestamp_utc` | TEXT | When the game was logged |
-| `local_date` | TEXT | Date game was played (ISO format) |
-| `split_id` | TEXT | e.g. `2026-S1` |
-| `game_name` | TEXT | Canonical game name |
-| `duration_min` | INTEGER | Duration (rounded to nearest 15 min) |
-| `players_json` | TEXT | JSON array of player Discord IDs |
-| `winners_json` | TEXT | JSON array of winner Discord IDs |
-| `pool_points` | REAL | Total points in the pool |
-| `points_per_winner` | REAL | Points each winner receives |
-| `review_flag` | INTEGER | 1 if duration > 120 min |
-| `notes` | TEXT | Admin notes |
-| `logged_by` | TEXT | Discord ID of the logger |
-| `channel_id` | TEXT | Channel where logged |
-| `message_id` | TEXT | Discord message ID |
+Stores active and historical game rows.
+
+Important columns:
+
+- `players_json`
+- `winners_json`
+- `pool_points`
+- `points_per_winner`
+- `supersedes_game_id`
+- `superseded_by_game_id`
+
+Only rows where `superseded_by_game_id IS NULL` are counted in active scoring.
 
 ### `game_instances_review`
-Soft-deleted games — same schema as `game_instances` plus:
 
-| Column | Type | Description |
-|---|---|---|
-| `deleted_at_utc` | TEXT | When the game was soft-deleted |
-| `deleted_by` | TEXT | Discord ID of who deleted it |
+Stores soft-deleted rows waiting in review.
 
-### `player_aliases`
-Maps Discord IDs to display names.
+Important extra columns:
 
-| Column | Type | Description |
-|---|---|---|
-| `discord_id` | TEXT PK | Discord user ID |
-| `alias` | TEXT | Display name |
-| `updated_at_utc` | TEXT | Last update timestamp |
+- `deleted_at_utc`
+- `deleted_by`
 
-### `audit_log`
-Persistent record of every write operation.
+### `derived_attendance`
 
-| Column | Type | Description |
-|---|---|---|
-| `id` | INTEGER PK | Auto-increment |
-| `timestamp_utc` | TEXT | When the action occurred |
-| `actor_discord_id` | TEXT | Who performed the action |
-| `action` | TEXT | e.g. `INSERT_GAME`, `SOFT_DELETE_GAME`, `RECOVER_GAME`, `SET_ALIAS`, `RENAME_GAME` |
-| `target_id` | TEXT | game_id, discord_id, etc. |
-| `payload_json` | TEXT | JSON snapshot of the affected record |
+Stores attendance derived from active logged games. This is separate from RSVP intent.
 
-### `canonical_games`
-Registry of approved game names for normalization.
+Important columns:
 
-| Column | Type | Description |
-|---|---|---|
-| `id` | INTEGER PK | Auto-increment |
-| `canonical_name` | TEXT UNIQUE | The official game name |
-| `added_at_utc` | TEXT | When added |
-| `added_by` | TEXT | Discord ID of adder |
+- `date_iso`
+- `discord_id`
+- `source`
+- `source_ref`
 
-### `game_name_aliases`
-Maps free-text variants to canonical game names.
+### `rsvps`
 
-| Column | Type | Description |
-|---|---|---|
-| `id` | INTEGER PK | Auto-increment |
-| `raw_name` | TEXT UNIQUE | As-typed variant (case-insensitive matched) |
-| `canonical_id` | INTEGER FK | References `canonical_games.id` |
-| `mapped_at_utc` | TEXT | When mapped |
+Stores user RSVP intent (`yes`, `maybe`, `unavailable`, `none`) independently of derived attendance.
 
----
+## Files
 
-## Scoring Formula
+- `bot.py`: entry point and small bot-facing commands
+- `competitive_scoring.py`: competitive scoring commands
+- `db.py`: SQLite schema and data access
+- `schedule.py`: scheduling and CSV updates
+- `rsvp.py`: reaction handlers and reconciliation
+- `aliases.py`: alias management and roster resolution
+- `discord_command_guide.txt`: Discord-ready pasteable command guide
 
-```
-pool = R × t × (p − 1) × (p / w) ^ α
+## Current State
 
-  R = 0.05 pts/min  (base rate)
-  t = duration in minutes (rounded to nearest 15)
-  p = number of players
-  w = number of winners
-  α = 0.5  (competition exponent)
+Implemented recently:
 
-points_per_winner = pool / w
-```
+- `/editgame` immutable correction workflow
+- `/mapgamealias`, `/reviewqueue`, `/reviewgame`, and `/gameinfo`
+- Derived attendance recomputation
+- Council quick-help commands
 
-### Leaderboard Ranking
+Recommended next work:
 
-1. Aggregate per-player: `total_points`, `total_hours`, `nights_attended`
-2. Eligibility: requires **≥ 7 hours** AND **≥ 3 nights** in the split
-3. Shrinkage adjustment (Bayesian):
-   ```
-   E_adj = (E0 × H0 + E × H) / (H0 + H)
-
-     E0 = average raw efficiency of eligible players
-     H0 = 6 hrs  (shrinkage stabilizer)
-     E  = player's raw efficiency (pts/hr)
-     H  = player's total hours
-
-   adjusted_total = E_adj × H
-   ```
-4. Sort by `adjusted_total` DESC; tiebreakers: `total_points`, `nights`, `hours`
-
-All constants are configurable in `scoring_config.py`.
-
----
-
-## In Progress
-
-No features are currently pending. All previously planned work has been implemented:
-
-- ✅ `/undo` and `/undo_last` — soft-delete to `game_instances_review`; `/recover` to restore
-- ✅ Audit log — all mutations written to `audit_log` table in `bot.db`
-- ✅ RSVP ❌ reaction — mutual exclusion enforced; "Unavailable" column tracked in schedule CSV
-- ✅ Expanded stats — win rate, most played game, points/night in `/mystats` and `/stats`; `/splitstats` command added
-- ✅ Game name normalization — `/addgame`, `/renamegame`; normalization applied at log time in `/loggame`
+- Add audit-inspection commands such as `/auditgame`
+- Add automated regression tests for scoring, review, and correction flows
+- Decide whether to further demote or hide legacy scoring commands

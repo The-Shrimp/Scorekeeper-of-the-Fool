@@ -20,6 +20,8 @@ from constants import (
 from utils_split import determine_split, schedule_filename_for
 from utils_time import get_upcoming_saturday_at_default_time, parse_time_input
 from aliases import get_alias_for_member
+from split_ids import split_id_for_date
+import db
 
 SCHEDULE_COLUMNS = [
     "Date", "Status", "Time", "Location", "Notes",
@@ -143,6 +145,18 @@ def update_schedule_entry(
 
     df.write_csv(schedule_file)
 
+    # Sync to DB
+    date_iso = target_date.strftime("%Y-%m-%d")
+    db.upsert_game_night(
+        date_iso=date_iso,
+        split_id=split_id_for_date(target_date),
+        status=status,
+        time_str=time_str,
+        location=location,
+        notes=notes,
+        afterwards_comments=afterwards_comments,
+    )
+
 def parse_list_field(text: str) -> list:
     if not isinstance(text, str) or not text.strip():
         return []
@@ -187,6 +201,44 @@ def update_schedule_attendance_for_member(target_date: date, member: discord.Mem
         pl.when(pl.col("Date") == date_str).then(pl.lit(unavailables_str)).otherwise(pl.col("Unavailable")).alias("Unavailable"),
     )
     df.write_csv(schedule_file)
+
+    # Sync RSVP and game night to DB
+    date_iso = target_date.strftime("%Y-%m-%d")
+    db.upsert_game_night(date_iso=date_iso, split_id=split_id_for_date(target_date))
+    db.upsert_rsvp(date_iso=date_iso, discord_id=str(member.id), rsvp_status=status)
+
+
+def sync_schedule_attendance_snapshot(
+    target_date: date,
+    yes_members: list[discord.Member],
+    maybe_members: list[discord.Member],
+    unavailable_members: list[discord.Member],
+) -> None:
+    """
+    Replace the schedule CSV and RSVP DB snapshot for a date from the authoritative invite state.
+    Used during startup reconciliation when the bot needs to catch up after downtime.
+    """
+    attendees = join_list_field([get_alias_for_member(m) for m in yes_members])
+    possible_attendees = join_list_field([get_alias_for_member(m) for m in maybe_members])
+    unavailable = join_list_field([get_alias_for_member(m) for m in unavailable_members])
+
+    update_schedule_entry(
+        target_date=target_date,
+        status="Scheduled",
+        attendees=attendees,
+        possible_attendees=possible_attendees,
+        unavailable=unavailable,
+    )
+
+    status_map: dict[str, str] = {}
+    for member in yes_members:
+        status_map[str(member.id)] = "yes"
+    for member in maybe_members:
+        status_map[str(member.id)] = "maybe"
+    for member in unavailable_members:
+        status_map[str(member.id)] = "unavailable"
+
+    db.replace_rsvps_for_night(target_date.strftime("%Y-%m-%d"), status_map)
 
 def _has_council_role(member: discord.Member) -> bool:
     return any(r.name == COUNCIL_ROLE_NAME for r in getattr(member, "roles", []))
@@ -280,3 +332,60 @@ def register(bot):
             f"Game night scheduled on **{final_date_str}** at **{final_time_display}** and posted in {target_channel.mention}.",
             ephemeral=True,
         )
+
+    @bot.tree.command(name="nightstatus", description="Show RSVP and attendance status for a game night (Council only).")
+    async def nightstatus(interaction: discord.Interaction, date: str):
+        if not interaction.guild:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+
+        if not _has_council_role(interaction.user):
+            await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+            return
+
+        try:
+            target_date = datetime.strptime(date.strip(), "%m/%d/%Y").date()
+        except ValueError:
+            await interaction.response.send_message("Please provide the date in `MM/DD/YYYY` format.", ephemeral=True)
+            return
+
+        date_iso = target_date.strftime("%Y-%m-%d")
+        night = db.get_game_night_by_date(date_iso)
+        rsvps = db.get_rsvps_for_night(date_iso)
+        derived = db.get_derived_attendance_for_night(date_iso)
+
+        if not night and not rsvps and not derived:
+            await interaction.response.send_message(
+                f"No game-night data found for {target_date.strftime('%m/%d/%Y')}.",
+                ephemeral=True,
+            )
+            return
+
+        yes_count = sum(1 for r in rsvps if r["rsvp_status"] == "yes")
+        maybe_count = sum(1 for r in rsvps if r["rsvp_status"] == "maybe")
+        unavailable_count = sum(1 for r in rsvps if r["rsvp_status"] == "unavailable")
+        derived_ids = sorted({str(r["discord_id"]) for r in derived})
+
+        lines = [
+            f"Date: {target_date.strftime('%m/%d/%Y')}",
+            f"Status: {night['status'] if night else 'Undecided'}",
+            f"Time: {night['time_str'] if night and night.get('time_str') else 'N/A'}",
+            f"Location: {night['location'] if night and night.get('location') else 'N/A'}",
+            f"RSVP Yes: {yes_count}",
+            f"RSVP Maybe: {maybe_count}",
+            f"RSVP No: {unavailable_count}",
+            f"Derived Attendance: {len(derived_ids)}",
+        ]
+
+        if derived_ids:
+            names = []
+            for did in derived_ids:
+                alias = db.get_alias(int(did))
+                if alias:
+                    names.append(alias)
+                    continue
+                member = interaction.guild.get_member(int(did))
+                names.append(member.display_name if member else f"User({did})")
+            lines.append(f"Attended: {', '.join(names)}")
+
+        await interaction.response.send_message("```" + "\n".join(lines) + "```", ephemeral=True)

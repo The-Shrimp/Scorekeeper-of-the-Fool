@@ -17,8 +17,8 @@ from datetime import datetime, date
 from typing import Optional
 
 from constants import YES_EMOJI, MAYBE_EMOJI, NO_EMOJI, ANNOUNCEMENT_CHANNEL_NAME
-from schedule import update_schedule_attendance_for_member, update_schedule_entry
-from aliases import get_alias_for_member
+from schedule import update_schedule_attendance_for_member, sync_schedule_attendance_snapshot
+import db
 
 async def _extract_date_from_message(message: discord.Message) -> Optional[date]:
     match = re.search(r"\b(\d{2}/\d{2}/\d{4})\b", message.content)
@@ -38,6 +38,21 @@ async def _get_member(guild: discord.Guild, user_id: int) -> Optional[discord.Me
         return await guild.fetch_member(user_id)
     except Exception:
         return None
+
+
+async def _remind_alias_if_missing(member: discord.Member, target_date: date) -> None:
+    if db.get_alias(member.id):
+        return
+    date_iso = target_date.strftime("%Y-%m-%d")
+    if not db.record_alias_reminder_if_new(date_iso, str(member.id)):
+        return
+    try:
+        await member.send(
+            "Please use the `/setalias` command to update your name on the leaderboard.\n\n"
+            "Thank you!"
+        )
+    except Exception:
+        pass
 
 async def reconcile_active_invitation(guild: discord.Guild):
     channel = discord.utils.get(guild.text_channels, name=ANNOUNCEMENT_CHANNEL_NAME)
@@ -94,20 +109,19 @@ async def reconcile_active_invitation(guild: discord.Guild):
     maybe_ids = {m.id for m in maybe_members}
     no_members = [m for m in no_members if m.id not in yes_ids and m.id not in maybe_ids]
 
-    attendees = ", ".join(get_alias_for_member(m) for m in yes_members)
-    possible = ", ".join(get_alias_for_member(m) for m in maybe_members)
-    unavailable = ", ".join(get_alias_for_member(m) for m in no_members)
-
-    update_schedule_entry(
+    sync_schedule_attendance_snapshot(
         target_date=active_date,
-        status="Scheduled",
-        attendees=attendees,
-        possible_attendees=possible,
-        unavailable=unavailable,
+        yes_members=yes_members,
+        maybe_members=maybe_members,
+        unavailable_members=no_members,
     )
+    for member in yes_members:
+        await _remind_alias_if_missing(member, active_date)
+    for member in maybe_members:
+        await _remind_alias_if_missing(member, active_date)
 
     print(f"[startup] Reconciled invite {active_date.strftime('%m/%d/%Y')} "
-          f"(yes={len(yes_members)}, maybe={len(maybe_members)}).")
+          f"(yes={len(yes_members)}, maybe={len(maybe_members)}, no={len(no_members)}).")
 
 def register(bot):
     @bot.event
@@ -150,6 +164,8 @@ def register(bot):
             competing = {YES_EMOJI, MAYBE_EMOJI}
 
         update_schedule_attendance_for_member(target_date, member, status)
+        if status in {"yes", "maybe"}:
+            await _remind_alias_if_missing(member, target_date)
 
         for reaction in message.reactions:
             if str(reaction.emoji) in competing:
