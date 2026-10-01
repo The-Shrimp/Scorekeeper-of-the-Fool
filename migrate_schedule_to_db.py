@@ -5,7 +5,7 @@ One-time script that imports all existing *_gamenights.csv files into the
 game_nights and rsvps tables in data/bot.db.
 
 How it works:
-  1. Reads every *_gamenights.csv in the project root.
+  1. Reads schedule CSVs from configured private storage after controlled cutover.
   2. Builds a reverse alias map (alias → discord_id) from player_aliases in the DB.
   3. Upserts each row into game_nights.
   4. Maps Attendees → 'yes', Possible Attendees → 'maybe', Unavailable → 'unavailable'
@@ -26,14 +26,14 @@ import polars as pl
 import db
 from split_ids import split_id_for_date
 
-# Players who appear in legacy CSVs under a display name rather than a bot alias.
-# Format: { "name as it appears in csv (lowercase)": "discord_id_string" }
-# Add entries here whenever a name can't be matched automatically.
-MANUAL_OVERRIDES = {}  # Identity mappings must be supplied privately.
+from pathlib import Path
+from config import require_private_storage_ready
+from public_identity import load_private_identity_mappings
 
-# Primary alias to register in player_aliases for each new discord_id.
-# Only used when the ID isn't already in player_aliases.
-MANUAL_ALIASES = {}  # Identity mappings must be supplied privately.
+# These mappings are personal data and are read only from private storage.
+_private_mappings = load_private_identity_mappings()
+MANUAL_OVERRIDES = _private_mappings["manual_overrides"]
+MANUAL_ALIASES = _private_mappings["manual_aliases"]
 
 
 def build_reverse_alias_map() -> dict[str, str]:
@@ -51,7 +51,7 @@ def register_manual_aliases() -> None:
     for discord_id, alias in MANUAL_ALIASES.items():
         if discord_id not in existing:
             db.upsert_alias(int(discord_id), alias)
-            print(f"  Registered alias: {discord_id} -> {alias!r}")
+            print("  Registered a private alias mapping.")
 
 
 def parse_date_to_iso(date_str: str) -> str | None:
@@ -76,9 +76,9 @@ def main() -> None:
     register_manual_aliases()
     reverse_alias = build_reverse_alias_map()
 
-    csv_files = sorted(glob.glob("*_gamenights.csv"))
+    csv_files = sorted(str(p) for p in (require_private_storage_ready() / "schedules").glob("*_gamenights.csv"))
     if not csv_files:
-        print("No *_gamenights.csv files found in the current directory.")
+        print("No private schedule CSVs are available.")
         sys.exit(0)
 
     total_nights = 0
@@ -86,7 +86,7 @@ def main() -> None:
     unmatched: set[str] = set()
 
     for csv_file in csv_files:
-        print(f"Processing {csv_file} ...")
+        print(f"Processing {Path(csv_file).name} ...")
         try:
             df = pl.read_csv(csv_file, infer_schema_length=0)
         except Exception as exc:
@@ -155,8 +155,7 @@ def main() -> None:
             f"\nThe following names had no matching discord_id in player_aliases "
             f"and were skipped ({len(unmatched)} unique):"
         )
-        for name in sorted(unmatched):
-            print(f"  - {name!r}")
+        print("Reconcile skipped identities in the private mapping file; names are not printed.")
         print(
             "These players may not have set an alias via /setalias. "
             "Their attendance has not been recorded in the DB."

@@ -27,6 +27,8 @@ from split_ids import split_id_for_date, current_split_id
 import db
 import scoring_engine as engine
 import aliases
+from public_identity import display_name_for_discord
+from privacy import is_authorized_guild
 
 # --- Permissions ---
 
@@ -34,16 +36,9 @@ def _has_council_role(member: discord.Member) -> bool:
     return any(r.name == COUNCIL_ROLE_NAME for r in getattr(member, "roles", []))
 
 # --- Alias display helper (ID -> alias) ---
-# Uses your guild cache; if user not found, fall back to ID string.
-# If you later migrate aliases into SQLite, this is where you'd swap lookup logic.
+# Only a listed alias or an independent, private-registry Player number is public.
 def display_name_for_id(guild: discord.Guild, discord_id: int) -> str:
-    alias = db.get_alias(discord_id)
-    if alias:
-        return alias
-    m = guild.get_member(discord_id)
-    if m:
-        return m.display_name
-    return f"User({discord_id})"
+    return display_name_for_discord(discord_id, db.get_alias(discord_id))
 
 
 def parse_mentions_to_ids(members: list[discord.Member]) -> list[int]:
@@ -134,55 +129,13 @@ def build_leaderboard_embed(
     ineligible: list[dict],
     e0: float,
 ) -> discord.Embed:
-    embed = discord.Embed(title=f"🏆 Leaderboard — {split_id}", color=_GOLD)
-    embed.set_footer(
-        text=f"Eligibility: ≥{cfg.MIN_ELIGIBLE_HOURS}h & ≥{cfg.MIN_ELIGIBLE_NIGHTS} nights  |  "
-             f"E0: {e0:.2f} pts/hr  |  H0: {cfg.H0_HOURS}h"
-    )
-
-    top = ranked[:cfg.TOP_N_ELIGIBLE]
-    if top:
-        names = [display_name_for_id(guild, int(r["discord_id"])) for r in top]
-        nw = max(min(max(len(n) for n in names), 16), 4)
-        header = f"{'#':<3} {'Name':<{nw}}  {'Adj':>5}  {'Pts':>5}  {'Hrs':>5}  {'Nts':>3}"
-        sep    = "─" * len(header)
-        rows   = []
-        for i, (r, raw_name) in enumerate(zip(top, names), 1):
-            rows.append(
-                f"{i:<3} {_trunc(raw_name, nw):<{nw}}  "
-                f"{engine.display_points(r['adjusted_total']):>5}  "
-                f"{engine.display_points(r['total_points']):>5}  "
-                f"{r['hours']:>5.1f}  "
-                f"{r['nights']:>3}"
-            )
-        embed.add_field(
-            name=f"Eligible Players (Top {cfg.TOP_N_ELIGIBLE})",
-            value=_code(f"{header}\n{sep}\n" + "\n".join(rows)),
-            inline=False,
-        )
-    else:
-        embed.add_field(
-            name=f"Eligible Players (Top {cfg.TOP_N_ELIGIBLE})",
-            value="_No eligible players yet._",
-            inline=False,
-        )
-
-    if ineligible:
-        names_i = [display_name_for_id(guild, int(r["discord_id"])) for r in ineligible[:10]]
-        nw_i = max(min(max(len(n) for n in names_i), 14), 4)
-        rows_i = []
-        for r, raw_name in zip(ineligible[:10], names_i):
-            rows_i.append(
-                f"{_trunc(raw_name, nw_i):<{nw_i}}  "
-                f"{engine.display_points(r['total_points']):>5}  "
-                f"{r['hours']:>4.1f}h  "
-                f"{r['nights']:>2} nts  "
-                f"{r['missing']}"
-            )
-        embed.add_field(name="Ineligible", value=_code("\n".join(rows_i)), inline=False)
-    else:
-        embed.add_field(name="Ineligible", value="_None._", inline=False)
-
+    embed = discord.Embed(title=f"Leaderboard - {split_id}", color=_GOLD)
+    rows = sorted(ranked + ineligible, key=lambda row: (-row["total_points"], display_name_for_id(guild, int(row["discord_id"]))))[:cfg.TOP_N_ELIGIBLE]
+    lines = []
+    for rank, row in enumerate(rows, 1):
+        name = discord.utils.escape_markdown(display_name_for_id(guild, int(row["discord_id"])))
+        lines.append(f"{rank}. {name} — {engine.display_points(row['total_points'])} points")
+    embed.add_field(name="Scores", value="\n".join(lines) or "No scores recorded yet.", inline=False)
     return embed
 
 
@@ -340,7 +293,7 @@ def register(bot: commands.Bot) -> None:
         Usage example:
         /loggame game:"Clue" minutes:47 players:"@A @B, Shrimp" winners:"@A" notes:"..."
         """
-        if not interaction.guild:
+        if not is_authorized_guild(interaction.guild):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
 
@@ -432,11 +385,11 @@ def register(bot: commands.Bot) -> None:
             guild=interaction.guild,
             notes_text=notes_text,
         )
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @bot.tree.command(name="leaderboard", description="Show the current split leaderboard (adjusted shrinkage ranking).")
     async def leaderboard(interaction: discord.Interaction):
-        if not interaction.guild:
+        if not is_authorized_guild(interaction.guild):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
 
@@ -454,10 +407,13 @@ def register(bot: commands.Bot) -> None:
 
     @bot.tree.command(name="stats", description="Show a player's split stats.")
     async def stats_cmd(interaction: discord.Interaction, player: discord.Member):
+        if not is_authorized_guild(interaction.guild) or not _has_council_role(interaction.user):
+            await interaction.response.send_message("Other player details are restricted to Council.", ephemeral=True)
+            return
         await _stats_for_user(interaction, player.id)
 
     async def _stats_for_user(interaction: discord.Interaction, user_id: int):
-        if not interaction.guild:
+        if not is_authorized_guild(interaction.guild):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
 
@@ -483,7 +439,10 @@ def register(bot: commands.Bot) -> None:
 
     @bot.tree.command(name="splitstats", description="Show aggregate stats for the current split.")
     async def splitstats(interaction: discord.Interaction):
-        if not interaction.guild:
+        if not is_authorized_guild(interaction.guild) or not _has_council_role(interaction.user):
+            await interaction.response.send_message("Split details are restricted to Council.", ephemeral=True)
+            return
+        if not is_authorized_guild(interaction.guild):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
 
@@ -496,11 +455,11 @@ def register(bot: commands.Bot) -> None:
 
         summary = engine.compute_split_summary(rows)
         embed = build_splitstats_embed(split_id, summary)
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @bot.tree.command(name="undo_last", description="Undo the most recently logged game (Council only).")
     async def undo_last(interaction: discord.Interaction):
-        if not interaction.guild:
+        if not is_authorized_guild(interaction.guild):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
         if not _has_council_role(interaction.user):
@@ -527,7 +486,7 @@ def register(bot: commands.Bot) -> None:
 
     @bot.tree.command(name="undo", description="Undo a specific game_id (Council only).")
     async def undo(interaction: discord.Interaction, game_id: int):
-        if not interaction.guild:
+        if not is_authorized_guild(interaction.guild):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
         if not _has_council_role(interaction.user):
@@ -548,7 +507,7 @@ def register(bot: commands.Bot) -> None:
 
     @bot.tree.command(name="recover", description="Restore a game from review back to the leaderboard (Council only).")
     async def recover(interaction: discord.Interaction, game_id: int):
-        if not interaction.guild:
+        if not is_authorized_guild(interaction.guild):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
         if not _has_council_role(interaction.user):
@@ -581,7 +540,7 @@ def register(bot: commands.Bot) -> None:
         date: Optional[str] = None,
         notes: Optional[str] = None,
     ):
-        if not interaction.guild:
+        if not is_authorized_guild(interaction.guild):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
         if not _has_council_role(interaction.user):
@@ -700,7 +659,7 @@ def register(bot: commands.Bot) -> None:
 
     @bot.tree.command(name="addgame", description="Register a canonical game name for normalization (Council only).")
     async def addgame(interaction: discord.Interaction, name: str):
-        if not interaction.guild:
+        if not is_authorized_guild(interaction.guild):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
         if not _has_council_role(interaction.user):
@@ -721,7 +680,7 @@ def register(bot: commands.Bot) -> None:
 
     @bot.tree.command(name="mapgamealias", description="Map a raw game name to a canonical game name (Council only).")
     async def mapgamealias(interaction: discord.Interaction, raw_name: str, canonical_name: str):
-        if not interaction.guild:
+        if not is_authorized_guild(interaction.guild):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
         if not _has_council_role(interaction.user):
@@ -746,7 +705,7 @@ def register(bot: commands.Bot) -> None:
 
     @bot.tree.command(name="reviewqueue", description="List recently soft-deleted games waiting in review (Council only).")
     async def reviewqueue(interaction: discord.Interaction, limit: Optional[int] = 10):
-        if not interaction.guild:
+        if not is_authorized_guild(interaction.guild):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
         if not _has_council_role(interaction.user):
@@ -771,7 +730,7 @@ def register(bot: commands.Bot) -> None:
 
     @bot.tree.command(name="reviewgame", description="Show the details of a soft-deleted game (Council only).")
     async def reviewgame(interaction: discord.Interaction, game_id: int):
-        if not interaction.guild:
+        if not is_authorized_guild(interaction.guild):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
         if not _has_council_role(interaction.user):
@@ -810,7 +769,7 @@ def register(bot: commands.Bot) -> None:
 
     @bot.tree.command(name="gameinfo", description="Show the details and correction lineage for an active game (Council only).")
     async def gameinfo(interaction: discord.Interaction, game_id: int):
-        if not interaction.guild:
+        if not is_authorized_guild(interaction.guild):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
         if not _has_council_role(interaction.user):
@@ -861,7 +820,7 @@ def register(bot: commands.Bot) -> None:
 
     @bot.tree.command(name="auditgame", description="Show recent audit entries related to a game (Council only).")
     async def auditgame(interaction: discord.Interaction, game_id: int, limit: Optional[int] = 10):
-        if not interaction.guild:
+        if not is_authorized_guild(interaction.guild):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
         if not _has_council_role(interaction.user):
@@ -881,7 +840,7 @@ def register(bot: commands.Bot) -> None:
 
     @bot.tree.command(name="renamegame", description="Rename a canonical game and update all historical records (Council only).")
     async def renamegame(interaction: discord.Interaction, old_name: str, new_name: str):
-        if not interaction.guild:
+        if not is_authorized_guild(interaction.guild):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
         if not _has_council_role(interaction.user):

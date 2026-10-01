@@ -13,14 +13,15 @@ from datetime import datetime
 
 from constants import COUNCIL_ROLE_NAME
 import db
+from public_identity import display_name_for_discord
+from privacy import is_authorized_guild
 
 def _has_council_role(member: discord.Member) -> bool:
     return any(r.name == COUNCIL_ROLE_NAME for r in getattr(member, "roles", []))
 
 def get_alias_for_member(member: discord.Member) -> str:
-    """Return alias if present, else display_name."""
-    a = db.get_alias(member.id)
-    return a if a else member.display_name
+    """Return the listed alias or a stable public Player number."""
+    return display_name_for_discord(member.id, db.get_alias(member.id))
 
 def resolve_aliases_to_members(guild: discord.Guild, raw_names: str):
     """
@@ -87,7 +88,7 @@ def register(bot):
 
     @bot.tree.command(name="setalias", description="Set or update your game night alias (stored in SQLite).")
     async def set_alias(interaction: discord.Interaction, alias: str):
-        if not interaction.guild:
+        if not is_authorized_guild(interaction.guild):
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
             return
 

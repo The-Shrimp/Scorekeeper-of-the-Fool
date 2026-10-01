@@ -14,7 +14,18 @@ import json
 from datetime import datetime
 from typing import Optional, Any
 
-DB_PATH = os.path.join("data", "bot.db")
+from config import get_runtime_database_path
+
+DB_PATH = str(get_runtime_database_path())
+
+
+class _ClosingConnection(sqlite3.Connection):
+    """Commit/roll back and close each context-managed database connection."""
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
 
 
 def _ensure_data_dir() -> None:
@@ -23,7 +34,7 @@ def _ensure_data_dir() -> None:
 
 def connect() -> sqlite3.Connection:
     _ensure_data_dir()
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, factory=_ClosingConnection)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -183,6 +194,52 @@ def init_db() -> None:
         );
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_alias_reminders_date ON alias_reminders(date_iso);")
+
+        # Announcement message tracking + scorekeeper link on game_nights
+        ensure_column("game_nights", "announcement_channel_id", "TEXT")
+        ensure_column("game_nights", "announcement_message_id", "TEXT")
+        ensure_column("game_nights", "scorekeeper_discord_id", "TEXT")
+
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS scorekeeper_rotation (
+            discord_id     TEXT PRIMARY KEY,
+            position       INTEGER UNIQUE NOT NULL,
+            created_at_utc TEXT NOT NULL
+        );
+        """)
+
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS scorekeeper_assignments (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            date_iso         TEXT NOT NULL,
+            discord_id       TEXT NOT NULL,
+            status           TEXT NOT NULL DEFAULT 'pending',
+            assigned_at_utc  TEXT NOT NULL,
+            responded_at_utc TEXT,
+            UNIQUE(date_iso, discord_id)
+        );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sk_assignments_date ON scorekeeper_assignments(date_iso);")
+
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS maybe_reminders (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            date_iso     TEXT NOT NULL,
+            discord_id   TEXT NOT NULL,
+            sent_at_utc  TEXT NOT NULL,
+            UNIQUE(date_iso, discord_id)
+        );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_maybe_reminders_date ON maybe_reminders(date_iso);")
+
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS scorekeeper_exclusions (
+            discord_id       TEXT PRIMARY KEY,
+            excluded_until   TEXT,
+            reason           TEXT,
+            excluded_at_utc  TEXT NOT NULL
+        );
+        """)
 
 
 # ---------------------------
@@ -855,3 +912,206 @@ def get_derived_attendance_for_night(date_iso: str) -> list[dict[str, Any]]:
             (date_iso,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------------------
+# Announcement IDs
+# ---------------------------
+
+def get_announcement_ids(date_iso: str) -> tuple[Optional[str], Optional[str]]:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT announcement_channel_id, announcement_message_id FROM game_nights WHERE date_iso = ?",
+            (date_iso,),
+        ).fetchone()
+    if row is None:
+        return None, None
+    return row["announcement_channel_id"], row["announcement_message_id"]
+
+
+def save_announcement_ids(
+    date_iso: str,
+    channel_id: Optional[str],
+    message_id: Optional[str],
+) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE game_nights SET announcement_channel_id = ?, announcement_message_id = ? WHERE date_iso = ?",
+            (
+                str(channel_id) if channel_id is not None else None,
+                str(message_id) if message_id is not None else None,
+                date_iso,
+            ),
+        )
+
+
+# ---------------------------
+# Scorekeeper
+# ---------------------------
+
+def get_scorekeeper_for_night(date_iso: str) -> Optional[str]:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT scorekeeper_discord_id FROM game_nights WHERE date_iso = ?",
+            (date_iso,),
+        ).fetchone()
+    return row["scorekeeper_discord_id"] if row else None
+
+
+def set_scorekeeper_for_night(date_iso: str, discord_id: Optional[str]) -> None:
+    with connect() as conn:
+        conn.execute(
+            "UPDATE game_nights SET scorekeeper_discord_id = ? WHERE date_iso = ?",
+            (discord_id, date_iso),
+        )
+
+
+def get_rotation() -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT discord_id, position FROM scorekeeper_rotation ORDER BY position ASC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def upsert_rotation(discord_id: str, position: int) -> None:
+    now_utc = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    with connect() as conn:
+        conn.execute("""
+            INSERT INTO scorekeeper_rotation (discord_id, position, created_at_utc)
+            VALUES (?, ?, ?)
+            ON CONFLICT(discord_id) DO UPDATE SET position = excluded.position
+        """, (str(discord_id), position, now_utc))
+
+
+def swap_rotation_positions(discord_id_a: str, discord_id_b: str) -> None:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT discord_id, position FROM scorekeeper_rotation WHERE discord_id IN (?, ?)",
+            (str(discord_id_a), str(discord_id_b)),
+        ).fetchall()
+        if len(rows) != 2:
+            return
+        pos = {str(r["discord_id"]): r["position"] for r in rows}
+        conn.execute(
+            "UPDATE scorekeeper_rotation SET position = ? WHERE discord_id = ?",
+            (pos[str(discord_id_b)], str(discord_id_a)),
+        )
+        conn.execute(
+            "UPDATE scorekeeper_rotation SET position = ? WHERE discord_id = ?",
+            (pos[str(discord_id_a)], str(discord_id_b)),
+        )
+
+
+def get_pending_assignment(date_iso: str) -> Optional[dict]:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM scorekeeper_assignments WHERE date_iso = ? AND status = 'pending'",
+            (date_iso,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_pending_assignment_for_user(discord_id: str) -> Optional[dict]:
+    """Return the most recent pending assignment for a user across all dates."""
+    with connect() as conn:
+        row = conn.execute(
+            """SELECT * FROM scorekeeper_assignments
+               WHERE discord_id = ? AND status = 'pending'
+               ORDER BY assigned_at_utc DESC LIMIT 1""",
+            (str(discord_id),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def upsert_assignment(date_iso: str, discord_id: str, status: str) -> None:
+    now_utc = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    with connect() as conn:
+        conn.execute("""
+            INSERT INTO scorekeeper_assignments (date_iso, discord_id, status, assigned_at_utc)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(date_iso, discord_id) DO UPDATE SET
+                status = excluded.status,
+                responded_at_utc = CASE
+                    WHEN excluded.status != 'pending' THEN ?
+                    ELSE responded_at_utc
+                END
+        """, (date_iso, str(discord_id), status, now_utc, now_utc))
+
+
+def get_declined_for_night(date_iso: str) -> set[str]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT discord_id FROM scorekeeper_assignments WHERE date_iso = ? AND status = 'declined'",
+            (date_iso,),
+        ).fetchall()
+    return {str(r["discord_id"]) for r in rows}
+
+
+# ---------------------------
+# Scorekeeper Exclusions
+# ---------------------------
+
+def add_rotation_exclusion(
+    discord_id: str,
+    excluded_until: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> None:
+    now_utc = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    with connect() as conn:
+        conn.execute("""
+            INSERT INTO scorekeeper_exclusions (discord_id, excluded_until, reason, excluded_at_utc)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(discord_id) DO UPDATE SET
+                excluded_until = excluded.excluded_until,
+                reason = excluded.reason,
+                excluded_at_utc = excluded.excluded_at_utc
+        """, (str(discord_id), excluded_until, reason, now_utc))
+
+
+def remove_rotation_exclusion(discord_id: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "DELETE FROM scorekeeper_exclusions WHERE discord_id = ?",
+            (str(discord_id),),
+        )
+
+
+def get_rotation_exclusions() -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT discord_id, excluded_until, reason FROM scorekeeper_exclusions"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def is_excluded(discord_id: str) -> bool:
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    with connect() as conn:
+        row = conn.execute(
+            """SELECT discord_id FROM scorekeeper_exclusions
+               WHERE discord_id = ?
+               AND (excluded_until IS NULL OR excluded_until >= ?)""",
+            (str(discord_id), today),
+        ).fetchone()
+    return row is not None
+
+
+# ---------------------------
+# Maybe Reminders
+# ---------------------------
+
+def record_maybe_reminder_if_new(date_iso: str, discord_id: str) -> bool:
+    """Insert a reminder record. Returns True only when first inserted."""
+    now_utc = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO maybe_reminders (date_iso, discord_id, sent_at_utc) VALUES (?, ?, ?)",
+            (date_iso, str(discord_id), now_utc),
+        )
+        return cur.rowcount == 1
+
+
+def clear_maybe_reminders_for_night(date_iso: str) -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM maybe_reminders WHERE date_iso = ?", (date_iso,))

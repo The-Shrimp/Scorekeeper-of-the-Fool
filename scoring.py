@@ -6,14 +6,19 @@ Renames /stats -> /legacystats to avoid colliding with competitive scoring /stat
 """
 
 import os
+import math
 import polars as pl
 import discord
 from datetime import datetime
 
 from utils_split import determine_split
+from config import get_runtime_legacy_dir
+from constants import COUNCIL_ROLE_NAME
+from privacy import is_authorized_guild
 
 def register(bot):
-    os.makedirs("data/legacy", exist_ok=True)
+    legacy_dir = get_runtime_legacy_dir()
+    legacy_dir.mkdir(parents=True, exist_ok=True)
 
     @bot.tree.command(name="updatescore", description="(Legacy) Append a score row to the split CSV.")
     async def update_score(
@@ -24,6 +29,14 @@ def register(bot):
         date: str = None,
         notes: str = "",
     ):
+        if not is_authorized_guild(interaction.guild) or not any(r.name == COUNCIL_ROLE_NAME for r in getattr(interaction.user, "roles", [])):
+            await interaction.response.send_message("Legacy score access is restricted to Council in the authorized server.", ephemeral=True)
+            return
+
+        if not math.isfinite(amount):
+            await interaction.response.send_message("Score must be a finite number.", ephemeral=True)
+            return
+
         if date is None:
             date = datetime.now().strftime("%m/%d/%Y")
         else:
@@ -35,7 +48,7 @@ def register(bot):
 
         split = determine_split(date)
         year = date.split("/")[-1]
-        file_name = f"data/legacy/{year}_{split}.csv"
+        file_name = str(legacy_dir / f"{year}_{split}.csv")
 
         if not interaction.guild:
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
@@ -70,9 +83,13 @@ def register(bot):
 
     @bot.tree.command(name="scoreboardleaders", description="(Legacy) Display leaders and runners-up for current split.")
     async def display_scoreboard_leaders(interaction: discord.Interaction):
+        if not is_authorized_guild(interaction.guild) or not any(r.name == COUNCIL_ROLE_NAME for r in getattr(interaction.user, "roles", [])):
+            await interaction.response.send_message("Legacy score access is restricted to Council in the authorized server.", ephemeral=True)
+            return
+
         split = determine_split(datetime.now().strftime("%m/%d/%Y"))
         year = datetime.now().year
-        file_name = f"data/legacy/{year}_{split}.csv"
+        file_name = str(legacy_dir / f"{year}_{split}.csv")
 
         if not interaction.guild:
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
@@ -84,7 +101,7 @@ def register(bot):
 
         df = pl.read_csv(file_name, infer_schema_length=0)
         if "PlayerID" not in df.columns or "Score" not in df.columns:
-            await interaction.response.send_message("Legacy CSV missing PlayerID/Score columns.")
+            await interaction.response.send_message("Legacy CSV missing PlayerID/Score columns.", ephemeral=True)
             return
 
         score_summary = df.group_by("PlayerID").agg(pl.col("Score").cast(pl.Float64).sum().alias("Score"))
@@ -107,11 +124,15 @@ def register(bot):
 
     @bot.tree.command(name="scoreboard", description="(Legacy) Display scoreboard for a specified year and split")
     async def display_scoreboard(interaction: discord.Interaction, year: int, split: int):
+        if not is_authorized_guild(interaction.guild) or not any(r.name == COUNCIL_ROLE_NAME for r in getattr(interaction.user, "roles", [])):
+            await interaction.response.send_message("Legacy score access is restricted to Council in the authorized server.", ephemeral=True)
+            return
+
         if split not in [1, 2]:
             await interaction.response.send_message("Invalid split. Enter 1 or 2.", ephemeral=True)
             return
 
-        file_name = f"data/legacy/{year}_Split{split}.csv"
+        file_name = str(legacy_dir / f"{year}_Split{split}.csv")
 
         if not interaction.guild:
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
@@ -137,12 +158,16 @@ def register(bot):
 
     @bot.tree.command(name="legacystats", description="(Legacy) Display statistics for a specified player, year, and split")
     async def display_player_stats(interaction: discord.Interaction, playername: str, year: int = None, split: int = None):
+        if not is_authorized_guild(interaction.guild) or not any(r.name == COUNCIL_ROLE_NAME for r in getattr(interaction.user, "roles", [])):
+            await interaction.response.send_message("Legacy score access is restricted to Council in the authorized server.", ephemeral=True)
+            return
+
         if year is None or split is None:
             current_date = datetime.now()
             year = year if year is not None else current_date.year
             split = split if split is not None else (1 if current_date.month <= 6 else 2)
 
-        file_name = f"data/legacy/{year}_Split{split}.csv"
+        file_name = str(legacy_dir / f"{year}_Split{split}.csv")
 
         if not interaction.guild:
             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)

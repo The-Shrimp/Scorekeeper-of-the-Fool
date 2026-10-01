@@ -22,6 +22,8 @@ import scoring
 import schedule
 import rsvp
 import competitive_scoring
+import scorekeeper
+from runtime_health import record_runtime_health
 
 
 def create_bot() -> commands.Bot:
@@ -38,12 +40,12 @@ def create_bot() -> commands.Bot:
     scoring.register(bot)
     schedule.register(bot)
     competitive_scoring.register(bot)
-
+    scorekeeper.register(bot)
 
     # Register event listeners
     rsvp.register(bot)
 
-    # Introduction command lives nicely here as it's tiny and “bot-facing”
+    # Introduction command lives nicely here as it's tiny and "bot-facing"
     try:
         with open(INTRODUCTION_FILE, "r", encoding="utf-8") as f:
             introduction = f.read()
@@ -117,23 +119,37 @@ def create_bot() -> commands.Bot:
     @bot.event
     async def on_ready():
         print("Bot is ready")
+        command_sync_ok = False
+        startup_errors = 0
         try:
             synced = await bot.tree.sync()
             print(f"Synced {len(synced)} command(s)")
+            command_sync_ok = True
         except Exception as e:
             print(f"Error in syncing commands: {e}")
 
-        # Startup reconciliation for “offline reaction changes”
-        try:
-            for g in bot.guilds:
-                await rsvp.reconcile_active_invitation(g)
-        except Exception as e:
-            print(f"[startup] Error while reconciling active invitation: {e}")
+        for g in bot.guilds:
+            try:
+                await scorekeeper.ensure_rotation_seeded(g)
+            except Exception as e:
+                startup_errors += 1
+                print("[startup] Error seeding rotation; details omitted for privacy.")
+            try:
+                await rsvp.reconcile_active_invitation(bot, g)
+            except Exception as e:
+                startup_errors += 1
+                print("[startup] Error reconciling invitation; details omitted for privacy.")
+
+        if not schedule.send_maybe_reminders.is_running():
+            schedule.send_maybe_reminders.start(bot)
+
+        record_runtime_health("ready", command_sync_ok=command_sync_ok, startup_errors=startup_errors)
 
     return bot
 
 def main():
     cfg = load_config()
+    record_runtime_health("starting")
     bot = create_bot()
     bot.run(cfg["DISCORD_BOT_TOKEN"])
 

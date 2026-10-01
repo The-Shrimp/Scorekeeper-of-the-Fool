@@ -21,9 +21,6 @@ Discord bot for tracking competitive game-night scoring, scheduling events, and 
 
 ```env
 DISCORD_BOT_TOKEN=your_token_here
-SECRET=your_secret
-APP_ID=your_app_id
-PUBLIC_KEY=your_public_key
 SERVER_ID=your_guild_id
 ```
 
@@ -33,13 +30,16 @@ SERVER_ID=your_guild_id
 pip install discord.py python-dotenv polars
 ```
 
-4. Run the bot:
+4. Configure an operator-chosen private storage directory outside the repository.
+   Existing installations must follow [PHASE1_PRIVACY.md](PHASE1_PRIVACY.md) before cutover.
+
+5. Run the bot after storage/launcher review:
 
 ```bash
 python bot.py
 ```
 
-The SQLite database at `data/bot.db` is created automatically on first run.
+New installations use configured private storage for SQLite. Existing installations retain their original live files while controlled cutover is pending. See [PHASE1_PRIVACY.md](PHASE1_PRIVACY.md) for configuration, export, maintenance and rollback instructions.
 
 ## Commands
 
@@ -51,8 +51,8 @@ The SQLite database at `data/bot.db` is created automatically on first run.
 | `/editgame <game_id> [game] [minutes] [players] [winners] [date] [notes]` | Council | Create an immutable corrected replacement for an existing game. |
 | `/leaderboard` | Anyone | Show the current split leaderboard. |
 | `/mystats` | Anyone | Show your current split stats. |
-| `/stats <player>` | Anyone | Show another player's current split stats. |
-| `/splitstats` | Anyone | Show aggregate split stats. |
+| `/stats <player>` | Council | Show another player's current split stats. |
+| `/splitstats` | Council | Show aggregate split stats. |
 | `/undo <game_id>` | Council | Move an active game to review. |
 | `/undo_last` | Council | Move the most recent active game in the current split to review. |
 | `/recover <game_id>` | Council | Restore a reviewed game to active scoring. |
@@ -98,10 +98,10 @@ The SQLite database at `data/bot.db` is created automatically on first run.
 
 | Command | Access | Description |
 |---|---|---|
-| `/updatescore <name> <amount> <game> [date] [notes]` | Anyone | Append a score entry to the legacy CSV. |
-| `/scoreboardleaders` | Anyone | Show leaders from legacy data. |
-| `/scoreboard <year> <split>` | Anyone | Show all legacy scores for a given year and split. |
-| `/legacystats <name> [year] [split]` | Anyone | Show legacy player stats. |
+| `/updatescore <name> <amount> <game> [date] [notes]` | Council | Append a score entry to the legacy CSV. |
+| `/scoreboardleaders` | Council | Show leaders from legacy data. |
+| `/scoreboard <year> <split>` | Council | Show all legacy scores for a given year and split. |
+| `/legacystats <name> [year] [split]` | Council | Show legacy player stats. |
 
 ## Current Scoring Workflow
 

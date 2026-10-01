@@ -8,3 +8,10 @@ data/*.db
 .venv/*
 __pycache__/
 *.pyc
+# Private inputs, local configuration and generated caches
+/data/
+/*_gamenights.csv
+/.private-config.json
+/.private-config.json.tmp
+/aliases.csv
+/tests/__pycache__/

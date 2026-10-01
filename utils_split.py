@@ -11,6 +11,7 @@ Best practice:
 """
 
 from datetime import date as date_type
+from config import get_runtime_schedules_dir
 
 def determine_split(date_str: str) -> str:
     """Return 'Split1' or 'Split2' based on MM/DD/YYYY."""
@@ -28,4 +29,6 @@ def schedule_filename_for(target_date: date_type) -> str:
     date_str = target_date.strftime("%m/%d/%Y")
     year = target_date.year
     split = determine_split(date_str)
-    return f"{year}_{split}_gamenights.csv"
+    directory = get_runtime_schedules_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    return str(directory / f"{year}_{split}_gamenights.csv")

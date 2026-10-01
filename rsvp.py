@@ -54,7 +54,7 @@ async def _remind_alias_if_missing(member: discord.Member, target_date: date) ->
     except Exception:
         pass
 
-async def reconcile_active_invitation(guild: discord.Guild):
+async def reconcile_active_invitation(bot: discord.Client, guild: discord.Guild):
     channel = discord.utils.get(guild.text_channels, name=ANNOUNCEMENT_CHANNEL_NAME)
     if channel is None:
         print(f"[startup] Channel #{ANNOUNCEMENT_CHANNEL_NAME} not found; skipping reconcile.")
@@ -120,6 +120,9 @@ async def reconcile_active_invitation(guild: discord.Guild):
     for member in maybe_members:
         await _remind_alias_if_missing(member, active_date)
 
+    from announcements import refresh_announcement
+    await refresh_announcement(bot, active_date.strftime("%Y-%m-%d"))
+
     print(f"[startup] Reconciled invite {active_date.strftime('%m/%d/%Y')} "
           f"(yes={len(yes_members)}, maybe={len(maybe_members)}, no={len(no_members)}).")
 
@@ -127,6 +130,12 @@ def register(bot):
     @bot.event
     async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         if payload.user_id == bot.user.id:
+            return
+
+        # DM reaction — route to scorekeeper decline handler
+        if payload.guild_id is None:
+            from scorekeeper import handle_dm_reaction_add
+            await handle_dm_reaction_add(bot, payload)
             return
 
         emoji_str = str(payload.emoji)
@@ -166,6 +175,9 @@ def register(bot):
         update_schedule_attendance_for_member(target_date, member, status)
         if status in {"yes", "maybe"}:
             await _remind_alias_if_missing(member, target_date)
+
+        from announcements import queue_refresh
+        await queue_refresh(bot, target_date.strftime("%Y-%m-%d"))
 
         for reaction in message.reactions:
             if str(reaction.emoji) in competing:
@@ -226,3 +238,6 @@ def register(bot):
             update_schedule_attendance_for_member(target_date, member, "unavailable")
         else:
             update_schedule_attendance_for_member(target_date, member, "none")
+
+        from announcements import queue_refresh
+        await queue_refresh(bot, target_date.strftime("%Y-%m-%d"))
