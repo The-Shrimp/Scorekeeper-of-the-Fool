@@ -1,3 +1,5 @@
+> Historical branch. Use `main` for the current bot. Private score and attendance inputs have been preserved outside the public repository. This older implementation does not include the current privacy and authorization controls; do not deploy it or merge it into the running bot.
+
 # Scorekeeper-of-the-Fool a Discord Bot for Score Tracking and MySQL Integration
 
 This Discord bot is designed to manage player scores, handle dynamic and frequently updated CSV files, and integrate with a MySQL database. The bot supports commands for updating scores, displaying leaderboards, and providing player statistics.
